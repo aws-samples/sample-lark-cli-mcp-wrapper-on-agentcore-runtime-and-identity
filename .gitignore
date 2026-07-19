@@ -1,3 +1,10 @@
 /sidecar-agentcore-identity
 /mcp-wrapper/mcp-wrapper
 *.key
+*.pem
+*.p12
+*.pfx
+.env
+.env.*
+*credentials*
+*.crt

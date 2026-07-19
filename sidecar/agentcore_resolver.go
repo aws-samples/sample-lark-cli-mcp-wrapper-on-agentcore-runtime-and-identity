@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -16,6 +17,14 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/bedrockagentcore"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockagentcore/types"
 )
+
+// getenvOr returns the environment variable's value, or fallback if unset/empty.
+func getenvOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
 
 // agentcoreConfig holds the fixed identifiers for this single-user deployment.
 // These values correspond to resources already created via boto3 in prior
@@ -31,10 +40,16 @@ type agentcoreConfig struct {
 
 func defaultAgentcoreConfig() agentcoreConfig {
 	return agentcoreConfig{
-		Region:               "us-east-1",
-		WorkloadName:         "feishu-mcp-workload",
-		CredentialProviderID: "feishu-oauth-provider",
-		UserID:               "panlm",
+		Region:               getenvOr("AGENTCORE_REGION", "us-east-1"),
+		WorkloadName:         getenvOr("AGENTCORE_WORKLOAD_NAME", "feishu-mcp-workload"),
+		CredentialProviderID: getenvOr("AGENTCORE_CREDENTIAL_PROVIDER_ID", "feishu-oauth-provider"),
+		// No per-request caller identity is currently available to key this
+		// by (see docs/AGENTCORE_IDENTITY_MCP_DESIGN.md) — DevOps Agent calls
+		// this MCP server with a bare service-level SigV4 identity, carrying
+		// no end-user claim. "bot" is a deliberately generic default, not a
+		// real person's name; override via AGENTCORE_USER_ID for any other
+		// single-tenant deployment.
+		UserID: getenvOr("AGENTCORE_USER_ID", "bot"),
 		// Must match both the workload identity's allowedResourceOauth2ReturnUrls
 		// allowlist (an AWS-side config already granted for this exact URL) and
 		// the dedicated callback listener started in main.go (default

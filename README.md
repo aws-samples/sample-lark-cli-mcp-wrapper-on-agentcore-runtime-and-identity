@@ -54,12 +54,25 @@ Full design rationale and the step-by-step verification log: see
 [`docs/AGENTCORE_IDENTITY_MCP_DESIGN.md`](docs/AGENTCORE_IDENTITY_MCP_DESIGN.md) and
 [`docs/AGENTCORE_IDENTITY_MCP_PLAN.md`](docs/AGENTCORE_IDENTITY_MCP_PLAN.md).
 
+## Configuration
+
+This is a single-tenant deployment: one `userId` is bound to one Feishu
+account in the Token Vault, set once via env vars on the sidecar process
+(not derived per-request — no caller identity is currently available to key
+it by; DevOps Agent calls this MCP server with a bare service-level SigV4
+identity carrying no end-user claim. See `docs/AGENTCORE_IDENTITY_MCP_PLAN.md`
+for what a multi-tenant `actor_id`-keyed version would need).
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `AGENTCORE_USER_ID` | `bot` | Token Vault key for this deployment's bound Feishu account |
+| `AGENTCORE_REGION` | `us-east-1` | AWS region for AgentCore Identity |
+| `AGENTCORE_WORKLOAD_NAME` | `feishu-mcp-workload` | Workload identity name |
+| `AGENTCORE_CREDENTIAL_PROVIDER_ID` | `feishu-oauth-provider` | OAuth2 credential provider name |
+
 ## First-time authorization (3LO)
 
-This is a single fixed-user deployment (`userId` is a config constant, not
-derived per-request — see `docs/AGENTCORE_IDENTITY_MCP_PLAN.md` for what a
-multi-tenant `actor_id`-keyed version would need). Authorization is a one-time
-manual step:
+Authorization is a one-time manual step:
 
 ```
 curl -X POST http://127.0.0.1:16385/_sidecar/auth/start
