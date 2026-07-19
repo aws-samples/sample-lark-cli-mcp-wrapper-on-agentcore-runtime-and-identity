@@ -56,6 +56,11 @@ func defaultAgentcoreConfig() agentcoreConfig {
 		// 127.0.0.1:3000): the browser is redirected here automatically after
 		// Feishu login, so handleCallback can complete the binding without a
 		// human copying session_id out of the address bar.
+		// nosemgrep: use-tls -- plain HTTP to localhost only. This is a
+		// loopback redirect target on the same machine, not a network hop;
+		// TLS would add no protection against an on-machine attacker that
+		// plain HTTP doesn't already lack, and the return-URL allowlist is
+		// an exact-match AWS-side config already granted for this string.
 		ReturnURL: "http://localhost:3000/callback",
 		// Full scope set for Task 9's calendar/docs verification. Each
 		// scope was independently confirmed to authorize cleanly (302 to

@@ -107,6 +107,12 @@ func runLarkExec(ctx context.Context, argsLine string) (execResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
+	// nosemgrep: dangerous-exec-command -- args is passed as argv, not through
+	// a shell (no "sh -c"), so shell metacharacters (;, |, `, &&) are not
+	// interpreted; they reach lark-cli as literal argument text. This is the
+	// intended contract of lark_exec: expose lark-cli's own command surface
+	// to the MCP caller. Access control belongs at the Gateway/IAM layer,
+	// not here.
 	cmd := exec.CommandContext(ctx, larkCLIBinPath(), args...)
 	cmd.Env = os.Environ()
 
