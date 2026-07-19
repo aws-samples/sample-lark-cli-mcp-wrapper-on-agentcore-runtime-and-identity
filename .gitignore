@@ -1,5 +1,6 @@
 /sidecar-agentcore-identity
 /mcp-wrapper/mcp-wrapper
+/mcp-wrapper/lark-cli-mcp-wrapper
 *.key
 *.pem
 *.p12
