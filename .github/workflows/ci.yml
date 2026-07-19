@@ -1,0 +1,26 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: build + test sidecar
+        run: |
+          go build -tags authsidecar_agentcore_identity ./sidecar/...
+          go vet -tags authsidecar_agentcore_identity ./sidecar/...
+          go test -tags authsidecar_agentcore_identity ./sidecar/...
+      - name: build + test mcp-wrapper
+        working-directory: mcp-wrapper
+        run: |
+          go build ./...
+          go vet ./...
+          go test ./...
