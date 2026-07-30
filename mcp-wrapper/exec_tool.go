@@ -6,17 +6,62 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 )
 
-// larkCLIBinPath returns the path to the lark-cli binary this wrapper shells
-// out to. Configurable via LARK_CLI_BIN_PATH so the same wrapper binary can
-// point at different lark-cli builds without recompiling.
+// defaultLarkCLIBin is where the container image installs lark-cli (see
+// deploy/agentcore-runtime/entrypoint.sh). Deliberately not a path under /tmp:
+// the binary named here inherits this process's credential-bearing
+// environment, so the default must not live in a world-writable directory.
+const defaultLarkCLIBin = "/usr/local/bin/lark-cli"
+
+// larkCLIBinPath returns the configured path to the lark-cli binary this
+// wrapper shells out to. Configurable via LARK_CLI_BIN_PATH so the same
+// wrapper binary can point at different lark-cli builds without recompiling.
+// Callers should go through resolveLarkCLIBin, which validates the result.
 func larkCLIBinPath() string {
 	if p := os.Getenv("LARK_CLI_BIN_PATH"); p != "" {
 		return p
 	}
-	return "/tmp/lark-cli-sandbox"
+	return defaultLarkCLIBin
+}
+
+// resolveLarkCLIBin validates the configured lark-cli path before it is handed
+// to exec. The path is deployment configuration rather than MCP caller input,
+// but it decides which binary runs with this process's environment (including
+// LARKSUITE_CLI_AUTH_PROXY and anything else the sidecar exports), so it is
+// checked rather than trusted: it must be absolute, an existing regular file
+// (not a symlink, directory, or device), and neither it nor its directory may
+// be writable by group or other. The sticky-bit exemption on the directory
+// check is what allows the documented local-dev flow that builds lark-cli into
+// /tmp: /tmp is 1777, and with the sticky bit set only the owner can replace an
+// existing entry, whereas a world-writable directory without it lets any local
+// process swap the binary out between builds.
+func resolveLarkCLIBin() (string, error) {
+	p := larkCLIBinPath()
+	if !filepath.IsAbs(p) {
+		return "", fmt.Errorf("lark-cli path must be absolute, got %q", p)
+	}
+	fi, err := os.Lstat(p)
+	if err != nil {
+		return "", fmt.Errorf("lark-cli not usable at %q: %w", p, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return "", fmt.Errorf("lark-cli at %q is not a regular file (mode %s)", p, fi.Mode())
+	}
+	if fi.Mode().Perm()&0o022 != 0 {
+		return "", fmt.Errorf("lark-cli at %q is group/world-writable (mode %04o)", p, fi.Mode().Perm())
+	}
+	dirPath := filepath.Dir(p)
+	dir, err := os.Stat(dirPath)
+	if err != nil {
+		return "", fmt.Errorf("lark-cli directory %q not usable: %w", dirPath, err)
+	}
+	if dir.Mode().Perm()&0o022 != 0 && dir.Mode()&os.ModeSticky == 0 {
+		return "", fmt.Errorf("lark-cli directory %q is group/world-writable without the sticky bit (mode %04o)", dirPath, dir.Mode().Perm())
+	}
+	return p, nil
 }
 
 // execResult is the structured outcome of running a lark-cli command,
@@ -104,16 +149,22 @@ func runLarkExec(ctx context.Context, argsLine string) (execResult, error) {
 		return execResult{}, fmt.Errorf("empty command")
 	}
 
+	bin, err := resolveLarkCLIBin()
+	if err != nil {
+		return execResult{}, err
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	// nosemgrep: dangerous-exec-command -- args is passed as argv, not through
-	// a shell (no "sh -c"), so shell metacharacters (;, |, `, &&) are not
-	// interpreted; they reach lark-cli as literal argument text. This is the
-	// intended contract of lark_exec: expose lark-cli's own command surface
-	// to the MCP caller. Access control belongs at the Gateway/IAM layer,
-	// not here.
-	cmd := exec.CommandContext(ctx, larkCLIBinPath(), args...)
+	// The command path is validated by resolveLarkCLIBin above, and args is
+	// passed as argv rather than through a shell (no "sh -c"), so shell
+	// metacharacters (;, |, `, &&) are not interpreted -- they reach lark-cli
+	// as literal argument text. Exposing lark-cli's own command surface is the
+	// intended contract of lark_exec; authorization belongs at the
+	// Gateway/IAM layer, not here.
+	// nosemgrep: dangerous-exec-command
+	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Env = os.Environ()
 
 	var stdout, stderr bytes.Buffer
