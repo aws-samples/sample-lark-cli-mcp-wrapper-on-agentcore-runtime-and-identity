@@ -1,0 +1,39 @@
+# Copyright (c) 2026 panlm
+# SPDX-License-Identifier: MIT
+#
+# CodeBuild spec for the lark-cli MCP wrapper image.
+#
+# Runs on an ARM_CONTAINER environment so linux/arm64 (what AgentCore Runtime
+# requires) is built natively rather than under emulation. privilegedMode must
+# be enabled on the project for the docker daemon to start.
+#
+# Expected environment variables (set on the CodeBuild project):
+#   REGISTRY       — ECR registry host, e.g. <acct>.dkr.ecr.us-east-1.amazonaws.com
+#   ECR_REPOSITORY — repository name, e.g. lark-cli-mcp
+#   IMAGE_TAG      — tag to push; override per build with --environment-variables-override
+
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - echo "Building ${ECR_REPOSITORY}:${IMAGE_TAG} for linux/arm64"
+      - aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
+  build:
+    commands:
+      # --provenance=false keeps the pushed artifact a plain image manifest.
+      # AgentCore Runtime resolves containerUri to a single-arch image; the
+      # attestation manifest buildx adds by default turns it into an index and
+      # the runtime rejects it.
+      - |
+        docker buildx build \
+          --platform linux/arm64 \
+          --provenance=false \
+          -f deploy/agentcore-runtime/Dockerfile \
+          -t "${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}" \
+          --push \
+          .
+  post_build:
+    commands:
+      - echo "Pushed ${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+      - aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids "imageTag=${IMAGE_TAG}" --region "${AWS_DEFAULT_REGION}" --query 'imageDetails[0].{tag:imageTags[0],digest:imageDigest,pushed:imagePushedAt}'
