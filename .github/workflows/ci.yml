@@ -15,7 +15,11 @@ jobs:
           go-version: "1.26"
       - name: build + test sidecar
         run: |
-          go build -tags authsidecar_agentcore_identity ./sidecar/...
+          # -o /dev/null: ./sidecar/ is a main package, so a bare `go build`
+          # tries to write a binary named "sidecar" into the repo root, where
+          # the sidecar/ directory already sits — which fails with
+          # `build output "sidecar" already exists and is a directory`.
+          go build -tags authsidecar_agentcore_identity -o /dev/null ./sidecar/
           go vet -tags authsidecar_agentcore_identity ./sidecar/...
           go test -tags authsidecar_agentcore_identity ./sidecar/...
       - name: build + test mcp-wrapper
