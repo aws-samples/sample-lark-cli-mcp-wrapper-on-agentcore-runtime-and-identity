@@ -1,3 +1,5 @@
+[English](README.md) | [中文](README_CN.md)
+
 # lark-cli MCP wrapper on AgentCore Runtime + Identity
 
 Exposes [lark-cli](https://github.com/larksuite/cli) (the official Lark/Feishu CLI) as an
