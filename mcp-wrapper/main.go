@@ -105,6 +105,16 @@ func main() {
 		Description: "Fetch the detailed orchestration guide for one Skill by name (parameter formats, call order, preconditions). Call lark_list_skills first to discover available names.",
 	}, larkGetSkillHandler)
 
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "lark_auth_start",
+		Description: "Begin Feishu authorization when lark_exec reports that authorization is required. Returns a URL for the operator to open in a browser, plus the session_id needed to finish. Takes no parameters. Follow this with lark_auth_complete.",
+	}, larkAuthStartHandler)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "lark_auth_complete",
+		Description: "Finish the authorization started by lark_auth_start, binding the operator's completed browser login to the credential vault. Pass the session_id from lark_auth_start (or from the session_id query parameter on the post-login redirect URL). Call within about 5 minutes of the login.",
+	}, larkAuthCompleteHandler)
+
 	// DisableLocalhostProtection: AgentCore Runtime's internal proxy connects
 	// to this container over its own loopback interface while forwarding the
 	// original public Host header, which otherwise trips the SDK's DNS
