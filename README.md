@@ -96,9 +96,9 @@ AgentCore Identity credential provider 和 workload identity。飞书那侧全�
   │  没有 session-binding       │  部署了 session-binding endpoint     │
   │  endpoint（默认）           │  （deploy/session-binding/）         │
   ├─────────────────────────────┼──────────────────────────────────────┤
-  │  → http://localhost:3000    │  → https://…/<token>（Lambda URL）   │
-  │    浏览器访问不到；页面      │    校验 state、assume 一个收窄的     │
-  │    打不开（预期行为）        │    role、调 CompleteResourceTokenAuth│
+  │  → http://localhost:3000    │  → https://…/<token>（CloudFront）   │
+  │    浏览器访问不到；页面      │    校验 state，再由 Lambda 调         │
+  │    打不开（预期行为）        │    CompleteResourceTokenAuth         │
   │                             │                                      │
   │  调用方把 session_id 传给    │  绑定已完成，直接调 lark_exec 即可   │
   │  lark_auth_complete          │                                      │
@@ -290,20 +290,18 @@ aws bedrock-agentcore-control update-agent-runtime \
 ### 可选：session-binding endpoint
 
 要去掉手工调 `lark_auth_complete` 这一步，部署
-[`deploy/session-binding/`](deploy/session-binding/README.md) 里的 endpoint。它会创建
-一个 Lambda function URL，AgentCore Identity 把浏览器跳转到那里，由它自己完成绑定。
+[`deploy/session-binding/`](deploy/session-binding/README.md) 里的 endpoint。它会创建一个
+CloudFront + Lambda 的落地页，AgentCore Identity 把浏览器跳转到那里，由它自己完成绑定。
 
 ```sh
 cd deploy/session-binding
-OPERATOR_PROFILE=<托管 Lambda 的 profile> \
-AGENT_PROFILE=<有 AgentCore Identity 的 profile> \
-  ./deploy.sh
+./deploy.sh
 ```
 
-两个账号可以是同一个。支持拆开是为了应对这种情况：AgentCore 在一个管控较严的账号里，而公开
-endpoint 不适合放那里——脚本会配好一个收窄的跨账号 role，两边各自只写自己账号的日志。脚本会
-打印需要设到 runtime 上的 `AGENTCORE_RETURN_URL` 和 `AGENTCORE_STATE_SECRET`；把两个都
-清掉就回退到手工流程。
+创建的是 CloudFront + WAF + Lambda：CloudFront 是唯一公网入口，Lambda 的 function URL 用
+origin access control 锁到那一个 distribution，直连返回 403。全部在持有 AgentCore Identity
+的同一个账号里，没有跨账号信任。脚本会打印需要设到 runtime 上的 `AGENTCORE_RETURN_URL` 和
+`AGENTCORE_STATE_SECRET`；把两个都清掉就回退到手工流程。
 
 ## 仓库结构
 
@@ -313,7 +311,7 @@ endpoint 不适合放那里——脚本会配好一个收窄的跨账号 role，
 | `sidecar/` | 认证 sidecar。从 Token Vault 解析真实飞书 token；唯一持有 token 的进程 |
 | `internal/larkendpoints/` | 从 lark-cli 复制的静态飞书/Lark 域名表，以及一个漂移检查脚本 |
 | `deploy/agentcore-runtime/` | `linux/arm64` runtime 镜像的 Dockerfile、entrypoint 和 CodeBuild buildspec |
-| `deploy/session-binding/` | 可选的 Lambda endpoint，自动化 OAuth 第二跳 |
+| `deploy/session-binding/` | 可选：CloudFront + Lambda endpoint，自动化 OAuth 第二跳 |
 | `skills/feishu-send-message/` | 从 AWS DevOps Agent 驱动这些工具的实操示例，含可直接粘贴的 `PROMPT.md` |
 | `docs/` | 飞书应用配置步骤（`FEISHU_APP_SETUP.md`）、设计推导和逐步验证记录 |
 
@@ -421,9 +419,9 @@ most common way to misconfigure this deployment, so they are drawn separately:
   │  WITHOUT session-binding    │  WITH session-binding endpoint       │
   │  endpoint (default)         │  (deploy/session-binding/)           │
   ├─────────────────────────────┼──────────────────────────────────────┤
-  │  → http://localhost:3000    │  → https://…/<token>  (Lambda URL)   │
-  │    unreachable from the     │    verifies state, assumes a scoped  │
-  │    browser; page fails      │    role, calls                       │
+  │  → http://localhost:3000    │  → https://…/<token>  (CloudFront)   │
+  │    unreachable from the     │    verifies state, then a Lambda     │
+  │    browser; page fails      │    behind it calls                   │
   │    to load (expected)       │    CompleteResourceTokenAuth         │
   │                             │                                      │
   │  caller passes session_id   │  binding already done; just call     │
@@ -643,22 +641,20 @@ depends on.
 
 To remove the manual `lark_auth_complete` step, deploy the endpoint in
 [`deploy/session-binding/`](deploy/session-binding/README.md). It provisions a
-Lambda function URL that AgentCore Identity redirects the browser to, which
+CloudFront-fronted Lambda that AgentCore Identity redirects the browser to, which
 completes the binding itself.
 
 ```sh
 cd deploy/session-binding
-OPERATOR_PROFILE=<profile hosting the Lambda> \
-AGENT_PROFILE=<profile with AgentCore Identity> \
-  ./deploy.sh
+./deploy.sh
 ```
 
-The two accounts may be the same. Splitting them is supported for the case where
-AgentCore lives in a governed account but the public endpoint should not — the
-script wires up a scoped cross-account role, and each side logs only to its own
-account. The script prints the `AGENTCORE_RETURN_URL` and
-`AGENTCORE_STATE_SECRET` to set on the runtime; clearing both reverts to the
-manual flow.
+This provisions CloudFront + WAF + Lambda: CloudFront is the only public entry
+point, and the Lambda's function URL is locked to that one distribution with
+origin access control, so a direct request returns 403. Everything lives in the
+same account as AgentCore Identity — no cross-account trust. The script prints
+the `AGENTCORE_RETURN_URL` and `AGENTCORE_STATE_SECRET` to set on the runtime;
+clearing both reverts to the manual flow.
 
 ## Repository layout
 
@@ -668,6 +664,6 @@ manual flow.
 | `sidecar/` | Auth sidecar. Resolves real Feishu tokens from the Token Vault; the only process that ever holds one |
 | `internal/larkendpoints/` | Static Feishu/Lark domain table copied from lark-cli, plus a drift check |
 | `deploy/agentcore-runtime/` | Dockerfile, entrypoint, and CodeBuild buildspec for the `linux/arm64` runtime image |
-| `deploy/session-binding/` | Optional Lambda endpoint that automates OAuth hop 2 |
+| `deploy/session-binding/` | Optional CloudFront + Lambda endpoint that automates OAuth hop 2 |
 | `skills/feishu-send-message/` | Worked example for driving the tools from AWS DevOps Agent, plus a paste-ready `PROMPT.md` |
 | `docs/` | Feishu app setup (`FEISHU_APP_SETUP.md`), design rationale, and the step-by-step verification log |

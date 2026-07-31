@@ -18,21 +18,29 @@ agent runtime must host a publicly accessible HTTPS callback endpoint itself"
 interchangeable — pointing the return URL at hop 1 makes the browser land on an
 endpoint that demands authorizationCode and state and rejects the visit.
 
-Cross-account by design: this function runs in the operator's own account, while
-the Token Vault lives in the AgentCore account. Token vaults carry no resource
-policy, so CompleteResourceTokenAuth cannot be granted cross-account directly —
-this function assumes a narrowly scoped role in the AgentCore account instead.
+Deployed as a Lambda behind CloudFront with origin access control, in the same
+account as the Token Vault. Two consequences shape this file:
 
-Defence in depth, given that a Function URL serving browser redirects has to be
-AuthType NONE (a redirect cannot carry SigV4):
+  * The function URL is AuthType AWS_IAM and its resource policy names only
+    cloudfront.amazonaws.com for one distribution ARN, so a direct request to
+    the function URL is refused and CloudFront is the only way in. A browser
+    redirect cannot carry SigV4, which is why the public edge has to be
+    unauthenticated — the checks below are what stands in for that.
+  * Same account means no role assumption: the execution role holds
+    CompleteResourceTokenAuth and the provider-secret read directly. A
+    cross-account trust policy would work too but is worth avoiding, since a
+    trust policy naming an external principal is exactly what internal security
+    scanners flag.
+
+Defence in depth at the edge:
 
   * signed customState — only the sidecar holds the HMAC key, so a request
     without a valid, unexpired state is rejected before any AWS call
-  * unguessable path segment — keeps opportunistic scans of the lambda-url
-    namespace from reaching the handler at all
-  * least privilege — the assumed role can only call CompleteResourceTokenAuth,
-    for one workload identity and one credential provider. A full compromise of
-    this function still cannot read a token or start an authorization.
+  * unguessable path segment — anything else answers 404 and reveals nothing
+  * WAF in front — rate limiting plus the AWS managed rule sets
+  * least privilege — the execution role can only complete a session binding for
+    one workload identity and one credential provider. A full compromise of this
+    function still cannot read a token or start an authorization.
   * short-lived material — AgentCore expires each authorization URL and session
     URI after 10 minutes
 
@@ -44,7 +52,6 @@ that verification is replaced by the signed state above rather than implemented.
 
 import hashlib
 import hmac
-import json
 import logging
 import os
 import time
@@ -59,12 +66,10 @@ STATE_TTL_SECONDS = 600  # AgentCore expires the session URI after 10 minutes.
 
 REGION = os.environ.get("AGENTCORE_REGION", "us-east-1")
 USER_ID = os.environ["AGENTCORE_USER_ID"]
-ASSUME_ROLE_ARN = os.environ["AGENTCORE_ASSUME_ROLE_ARN"]
-EXTERNAL_ID = os.environ["AGENTCORE_EXTERNAL_ID"]
 STATE_SECRET = os.environ["AGENTCORE_STATE_SECRET"].encode()
 PATH_TOKEN = os.environ["CALLBACK_PATH_TOKEN"]
 
-_sts = boto3.client("sts", region_name=REGION)
+_agentcore = boto3.client("bedrock-agentcore", region_name=REGION)
 
 
 def _verify_state(state: str, now: float) -> None:
@@ -88,31 +93,6 @@ def _verify_state(state: str, now: float) -> None:
     age = now - int(parts[1])
     if age < -60 or age > STATE_TTL_SECONDS:
         raise ValueError(f"state expired or not yet valid (age {age:.0f}s)")
-
-
-def _complete_auth(session_id: str) -> None:
-    """Bind the completed browser authorization to this deployment's userId.
-
-    Runs against the AgentCore account via a scoped assumed role, since the
-    Token Vault lives there and cannot be shared through a resource policy.
-    """
-    creds = _sts.assume_role(
-        RoleArn=ASSUME_ROLE_ARN,
-        RoleSessionName="lark-session-binding",
-        ExternalId=EXTERNAL_ID,
-        DurationSeconds=900,
-    )["Credentials"]
-
-    boto3.client(
-        "bedrock-agentcore",
-        region_name=REGION,
-        aws_access_key_id=creds["AccessKeyId"],
-        aws_secret_access_key=creds["SecretAccessKey"],
-        aws_session_token=creds["SessionToken"],
-    ).complete_resource_token_auth(
-        sessionUri=session_id,
-        userIdentifier={"userId": USER_ID},
-    )
 
 
 def _page(title: str, message: str) -> str:
@@ -145,8 +125,8 @@ def handler(event, _context):
     path = event.get("rawPath", "")
     params = event.get("queryStringParameters") or {}
 
-    # Wrong path: answer exactly as if nothing is deployed here, so scanning the
-    # lambda-url namespace reveals nothing about what this function is.
+    # Wrong path: answer exactly as if nothing is deployed here, so a scan of the
+    # distribution reveals nothing about what this function is.
     if not path.endswith(f"/{PATH_TOKEN}"):
         logger.warning("rejected request to unexpected path")
         return _html(404, "Not found", "No such page.")
@@ -164,7 +144,10 @@ def handler(event, _context):
         return _html(400, "Invalid request", "This authorization link is not valid.")
 
     try:
-        _complete_auth(session_id)
+        _agentcore.complete_resource_token_auth(
+            sessionUri=session_id,
+            userIdentifier={"userId": USER_ID},
+        )
     except Exception:  # noqa: BLE001 - report one generic failure to the browser
         logger.exception("CompleteResourceTokenAuth failed")
         return _html(

@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
 
+# This workflow only builds and tests; it publishes nothing. Declaring the
+# minimum here means the job does not inherit whatever the repository or
+# organization default happens to be.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest

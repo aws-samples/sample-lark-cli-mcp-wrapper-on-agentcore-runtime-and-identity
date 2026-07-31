@@ -56,6 +56,7 @@ FROM debian:bookworm-slim
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl \
+  && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /out/lark-cli /usr/local/bin/lark-cli
@@ -63,6 +64,19 @@ COPY --from=build /out/sidecar-agentcore-identity /usr/local/bin/sidecar-agentco
 COPY --from=build /out/mcp-wrapper /usr/local/bin/mcp-wrapper
 COPY deploy/agentcore-runtime/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Nothing here needs root: all three binaries bind unprivileged ports (8000,
+# 16385, 3000) and write only under HOME. Running as a fixed non-root uid also
+# means the HMAC key file's 0600 mode is meaningful — as root it would be
+# readable regardless.
+#
+# HOME is set explicitly because the sidecar derives its default key path from
+# it (os.UserHomeDir), and an unset HOME would send that to a path this user
+# cannot write. entrypoint.sh overrides the path anyway; this keeps the default
+# correct for anyone running the binary directly inside the image.
+RUN useradd --system --create-home --uid 10001 --shell /usr/sbin/nologin lark
+USER 10001
+ENV HOME=/home/lark
 
 ENV AGENTCORE_RUNTIME=1
 

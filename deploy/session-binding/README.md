@@ -6,8 +6,8 @@
 
 # Session-binding endpoint（可选）
 
-去掉首次飞书授权里那一步手工操作。不部署也能用——只是需要操作者把 `session_id` 交给
-`lark_auth_complete`。想让浏览器跳转自己把活干完，就部署这个。
+去掉首次飞书授权里那一步手工操作。不部署也能用——只是 agent 需要多调一次
+`lark_auth_complete`。部署了之后，浏览器登录完就自动绑定。
 
 ## 为什么需要一个独立的 endpoint
 
@@ -47,10 +47,6 @@ constraint: Member must not be null; Value at 'state' failed to satisfy
 constraint: Member must not be null
 ```
 
-[`awslabs/agentcore-samples`](https://github.com/awslabs/agentcore-samples) 里的每一个
-示例都遵循同样的分工：provider 的 `callbackUrl` 注册给 IdP，而
-`allowedResourceOauth2ReturnUrls` 永远指向一个客户自己托管的 server。
-
 ## 流程
 
 ```
@@ -60,18 +56,19 @@ constraint: Member must not be null
           │  authorization_url（带签名 state）                    │
           ▼                                                      ▼
    AgentCore Identity ──────────────────────────────▶  accounts.feishu.cn
-   （agent 账号）                 authorize                （登录 + 授权）
+                                authorize                （登录 + 授权）
           ▲                                                      │
           │  第一跳：authorizationCode + state                     │
           └──────────────────────────────────────────────────────┘
           │
           │  第二跳：带 session_id + state 的跳转
           ▼
-   Lambda function URL（operator 账号）
-          │  1. path token 不匹配就拒
-          │  2. state HMAC 校验不过、或超过 10 分钟就拒
-          │  3. sts:AssumeRole ──▶ LarkCliMcpSessionBindingRole（agent 账号）
-          │  4. CompleteResourceTokenAuth(sessionUri, userId)
+   CloudFront + WAF  ──── OAC 签名（SigV4）────▶  Lambda function URL
+   （唯一的公网入口）                              （AuthType AWS_IAM，
+          │                                        直连返回 403）
+          │  1. path token 不匹配就拒（404）
+          │  2. state HMAC 校验不过、或超过 10 分钟就拒（400）
+          │  3. CompleteResourceTokenAuth(sessionUri, userId)
           ▼
    "Feishu authorization complete" 页面
 
@@ -80,43 +77,48 @@ constraint: Member must not be null
 
 飞书从不跟这个 endpoint 通信。它只会跳到第一跳。
 
-## 跨账号布局
+## 资源布局
 
-这套部署故意把两个账号拆开：AgentCore 相关资源放在管控较严的公司账号里，而公开 endpoint 放在
-操作者自己的账号里——在那里暴露一个 function URL 不是个合规问题。
+全部在持有 AgentCore Identity 的**同一个账号**里，没有跨账号信任：
 
 ```
-OPERATOR 账号                            AGENT 账号
-├── lark-session-binding  (Lambda)      ├── feishu-mcp-workload   (workload identity)
-├── function URL, AuthType NONE         ├── feishu-oauth-provider (credential provider)
-├── LarkSessionBindingLambdaRole        ├── LarkCliMcpSessionBindingRole
-│     • sts:AssumeRole 只到那一个 role   │     • 只信 operator 的 Lambda role
-│     • 只写自己账号的 log group         │       + ExternalId
-└── /aws/lambda/lark-session-binding    │     • CompleteResourceTokenAuth（收窄）
-                                        │     • 只能读 provider 那一个 secret
-                                        └── AgentCore runtime
+├── CloudFront distribution      ← 唯一公网入口，挂 WAF
+│     └── origin access control  ← 用 SigV4 签名到 origin 的请求
+├── WAF WebACL                   ← rate limit + AWS 托管规则集
+├── lark-session-binding (Lambda)
+│     └── function URL           ← AuthType AWS_IAM，resource policy 只允许
+│                                   cloudfront.amazonaws.com + 这个 distribution
+├── LarkSessionBindingLambdaRole
+│     • CompleteResourceTokenAuth（限定到一个 workload identity + 一个 provider）
+│     • GetSecretValue（只能读 provider 那一个 secret）
+│     • 只写自己那个 log group
+└── feishu-mcp-workload 的 allowedResourceOauth2ReturnUrls 加上 CloudFront 域名
 ```
 
-trust policy 是两个账号之间唯一的联系。两边都不往对方写日志：Lambda role 的 `logs:*` 授权
-写死了自己那个 log group 的 ARN，所以跨账号写是被 IAM 拒掉的，不只是"没配"。
+**为什么不跨账号**：早先的版本把 Lambda 放在操作者自己的账号里，通过跨账号 role 去调
+`CompleteResourceTokenAuth`（token vault 不支持 resource policy，跨账号只能这么做）。那个
+trust policy 会被内部安全扫描判定为"允许组织外主体 assume"。同账号部署把这个问题整个去掉，
+也少了 `AssumeRole`、`ExternalId` 和两个环境变量。
 
-跨账号 role 是必需的，不是风格选择——token vault 不支持 resource policy，所以
-`CompleteResourceTokenAuth` 没法跨账号直接授权。把 Lambda 直接部署到 agent 账号里就能完全
-去掉 trust 关系和 `AssumeRole` 这一跳；handler 代码不用改，只要去掉
-`AGENTCORE_ASSUME_ROLE_ARN`/`AGENTCORE_EXTERNAL_ID`，把那两个权限直接给执行角色即可。
+如果确实需要 Lambda 和 Token Vault 分账号，`handler.py` 里改一处即可（用 `sts:AssumeRole`
+拿临时凭证再建 client），但要预期那条 trust policy 会被扫描告警。
 
 ## 安全模型
 
-给浏览器跳转用的 function URL 必须是 `AuthType: NONE`——跳转带不了 SigV4 签名。下面几层都是
-为了补偿这一点。
+浏览器跳转带不了 SigV4，所以最外层那一跳必须是未认证的。下面几层是为此补偿的。
 
 | 层 | 挡住什么 |
 |---|---|
-| 不可猜的 path 段 | 对 `lambda-url.*.on.aws` 命名空间的扫描；path 不对只回一个什么都不透露的 404 |
+| CloudFront + OAC | 直连 Lambda function URL 返回 403。resource policy 里没有 wildcard principal，只有 `cloudfront.amazonaws.com` + `AWS:SourceArn` 锁到那一个 distribution |
+| WAF | rate limit（100 req/5min per IP）+ AWS 托管的 CommonRuleSet 和 KnownBadInputs |
+| 不可猜的 path 段 | 对 distribution 的扫描；path 不对只回一个什么都不透露的 404 |
 | HMAC 签名的 `customState` | 不是本部署发起的请求。这是 AWS [明确推荐](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/oauth2-authorization-url-session-binding.html)的做法：只有 sidecar 持有密钥 |
 | state 10 分钟 TTL | 旧跳转的重放。时间戳在签名内容里，改不了 |
-| 最小权限的 assumed role | 即使 Lambda 被完全攻破，也读不到 token、发不起授权——只能绑定一个真实登录已经产生的 session |
-| trust policy 上的 `ExternalId` | 知道 role ARN 但不知道这个共享值的人 |
+| 最小权限执行角色 | 即使 Lambda 被完全攻破，也读不到 token、发不起授权——只能绑定一个真实登录已经产生的 session |
+
+CloudFront + OAC 这个组合是 AWS 认可的标准形态，Security Hub 有对应的 control
+（[CloudFront.16](https://docs.aws.amazon.com/securityhub/latest/userguide/cloudfront-controls.html)）
+**要求**给 Lambda function URL origin 配 OAC。
 
 **故意没实现的部分。** AWS 示例会校验"发起授权的用户 == 完成授权的用户"，方式是读浏览器
 session cookie。这是一个单租户部署，只有一个固定 `userId`，没有 web session 可查，所以那道
@@ -125,21 +127,19 @@ session-binding 文档。
 
 `AGENTCORE_STATE_SECRET` 以明文存在 Lambda 和 runtime 两侧的环境变量里，所以能读到任一份
 配置的人都能伪造 state。但要利用它仍然需要一个未过期的 `session_id`，也就是得先完成一次飞书
-登录。在意这点的部署可以把两边都换成 Secrets Manager（secret 支持跨账号 resource policy），
-代价是两边各多一次查询。
+登录。在意这点的部署可以把两边都换成 Secrets Manager，代价是两边各多一次查询。
 
 ## 部署
 
-`./deploy.sh` 会创建全部资源，并打印需要设到 runtime 上的两个值。脚本是幂等的——改完 policy
-重跑是安全的。
+`./deploy.sh` 会创建全部资源，并打印需要设到 runtime 上的两个值。脚本是幂等的——改完
+policy 或 handler 重跑是安全的。
 
 ```sh
-export OPERATOR_PROFILE=self           # 托管 Lambda 的账号
-export AGENT_PROFILE=default           # 有 AgentCore Identity 的账号
-./deploy.sh
+cd deploy/session-binding
+./deploy.sh                # 用当前 AWS profile；AWS_REGION 默认 us-east-1
 ```
 
-然后把打印出来的环境变量设到 runtime 上：
+新建的 distribution 要 5-10 分钟才会变成 `Deployed`。之后把打印出来的环境变量设到 runtime：
 
 ```sh
 aws bedrock-agentcore-control update-agent-runtime \
@@ -148,16 +148,16 @@ aws bedrock-agentcore-control update-agent-runtime \
   ... # 以及 update-agent-runtime 其余必填参数
 ```
 
-两个都必须设。只设 `AGENTCORE_RETURN_URL` 会让浏览器跳到 Lambda 但没有 state 可验，每次
-回调都会被拒。
+两个都必须设。只设 `AGENTCORE_RETURN_URL` 会让浏览器跳到 CloudFront 但没有 state 可验，
+每次回调都会被拒。
 
 验证方式：调 `lark_auth_start` 并完成登录，浏览器最后应该停在 "Feishu authorization
-complete"，然后 `lark_exec` 直接可用，不需要调 `lark_auth_complete`。
+complete"，然后 `lark_exec` 直接可用，不需要调 `lark_auth_complete`。同时直连 Lambda
+function URL 应该返回 403。
 
 ## 回退
 
-清掉那两个环境变量，runtime 就指回 loopback 监听器。手工流程立即恢复，别的都不用改，Lambda
-留着或删掉都行。
+清掉那两个环境变量，runtime 就指回 loopback 监听器。手工流程立即恢复，别的都不用改。
 
 ```sh
 aws bedrock-agentcore-control update-agent-runtime \
@@ -168,26 +168,28 @@ aws bedrock-agentcore-control update-agent-runtime \
 
 | 文件 | 用途 |
 |---|---|
-| `handler.py` | Lambda 本体：校验请求、assume 跨账号 role、调 `CompleteResourceTokenAuth`、渲染结果页 |
-| `deploy.sh` | 创建两个账号的 IAM、Lambda、function URL，以及 return-URL 白名单条目 |
+| `handler.py` | Lambda 本体：校验请求、调 `CompleteResourceTokenAuth`、渲染结果页 |
+| `deploy.sh` | 创建 IAM、Lambda、function URL、OAC、WAF、CloudFront，以及 return-URL 白名单条目 |
 
-IAM policy 是写在 `deploy.sh` 里的 heredoc，不是单独的 json 文件，因为里面要插账号 ID、
-region 和 secret ARN。`grep -n 'Sid' deploy.sh` 可以快速扫出四段 policy。
+IAM policy 和 WAF 规则是写在 `deploy.sh` 里的 heredoc，不是单独的 json 文件，因为里面要插
+账号 ID、region 和 secret ARN。`grep -n 'Sid' deploy.sh` 可以快速扫出各段 policy。
 
 ## 故障排查
 
-失败信息落在 Lambda 自己的 log group（operator 账号下的
-`/aws/lambda/lark-session-binding`）。浏览器只会看到一句笼统的提示。
+失败信息落在 Lambda 自己的 log group（`/aws/lambda/lark-session-binding`）。浏览器只会看到
+一句笼统的提示。
 
 | 现象 | 原因 |
 |---|---|
-| function URL 所有请求都返回 403 | 2025 年 10 月起，`AuthType: NONE` 的 URL 需要在 resource policy 里**同时**有 `lambda:InvokeFunctionUrl` 和 `lambda:InvokeFunction`。`deploy.sh` 两条都加了 |
+| 直连 function URL 返回 403 | **这是预期行为。** OAC 生效后只有 CloudFront 能调 |
+| 走 CloudFront 也返回 403 | resource policy 里的 `AWS:SourceArn` 和实际 distribution 不匹配，或 function URL 的 `AuthType` 不是 `AWS_IAM`；重跑 `deploy.sh` |
+| CloudFront 返回 502/503 | distribution 还在 `InProgress`，或 origin request policy 不是 `AllViewerExceptHostHeader`（origin 收到 CloudFront 的 Host 头会拒签名） |
 | `state rejected: state signature mismatch` | runtime 和 Lambda 两边的 `AGENTCORE_STATE_SECRET` 不一致 |
 | `state rejected: malformed state` | runtime 上没设 `AGENTCORE_STATE_SECRET`，所以压根没发 state |
-| `sts:AssumeRole` 报 `AccessDenied` | trust policy 或 `ExternalId` 不匹配；重跑 `deploy.sh` |
-| `AccessDeniedException ... secretsmanager:GetSecretValue` | assumed role 读不到 provider 的 client secret，而 `CompleteResourceTokenAuth` 内部需要它去兑换 code |
+| `AccessDeniedException ... secretsmanager:GetSecretValue` | 执行角色读不到 provider 的 client secret，而 `CompleteResourceTokenAuth` 内部需要它去兑换 code |
 | `AccessDeniedException: Invalid or expired session` | session URI 已被消费过，或超过 10 分钟。用 `lark_auth_start` 重来 |
 | 浏览器显示 `authorizationCode ... must not be null` | `AGENTCORE_RETURN_URL` 指向了第一跳的 callback，而不是这个 endpoint |
+| 回调页面被缓存 | cache policy 必须是 `CachingDisabled`；`session_id` 是一次性的，缓存会导致重放失败 |
 
 ---
 
@@ -195,10 +197,9 @@ region 和 secret ARN。`grep -n 'Sid' deploy.sh` 可以快速扫出四段 polic
 
 # Session-binding endpoint (optional)
 
-Removes the manual step from first-time Feishu authorization. Without it the
-flow still works — the operator hands `session_id` to `lark_auth_complete`
-instead. Deploy this when you want the browser redirect to finish the job by
-itself.
+Removes the manual step from first-time Feishu authorization. Without it the flow
+still works — the agent just makes one extra `lark_auth_complete` call. With it,
+completing the browser login binds the session on its own.
 
 ## Why a separate endpoint is needed
 
@@ -242,10 +243,6 @@ constraint: Member must not be null; Value at 'state' failed to satisfy
 constraint: Member must not be null
 ```
 
-Every sample in [`awslabs/agentcore-samples`](https://github.com/awslabs/agentcore-samples)
-follows the same split: the provider `callbackUrl` is registered with the IdP,
-and `allowedResourceOauth2ReturnUrls` always points at a customer-hosted server.
-
 ## Flow
 
 ```
@@ -255,18 +252,19 @@ and `allowedResourceOauth2ReturnUrls` always points at a customer-hosted server.
           │  authorization_url (+ signed state)                  │
           ▼                                                      ▼
    AgentCore Identity ──────────────────────────────▶  accounts.feishu.cn
-   (agent account)               authorize                  (login + consent)
+                                authorize                  (login + consent)
           ▲                                                      │
           │  hop 1: authorizationCode + state                     │
           └──────────────────────────────────────────────────────┘
           │
           │  hop 2: redirect with session_id + state
           ▼
-   Lambda function URL  (operator account)
-          │  1. reject unless path token matches
-          │  2. reject unless state HMAC validates and is < 10 min old
-          │  3. sts:AssumeRole ──▶ LarkCliMcpSessionBindingRole (agent acct)
-          │  4. CompleteResourceTokenAuth(sessionUri, userId)
+   CloudFront + WAF ──── OAC-signed (SigV4) ────▶  Lambda function URL
+   (the only public entry)                          (AuthType AWS_IAM;
+          │                                          direct access → 403)
+          │  1. reject unless the path token matches (404)
+          │  2. reject unless the state HMAC validates, < 10 min old (400)
+          │  3. CompleteResourceTokenAuth(sessionUri, userId)
           ▼
    "Feishu authorization complete" page
 
@@ -275,49 +273,55 @@ and `allowedResourceOauth2ReturnUrls` always points at a customer-hosted server.
 
 Feishu never talks to this endpoint. It only ever redirects to hop 1.
 
-## Cross-account layout
+## Resource layout
 
-This deployment splits the two accounts deliberately: the AgentCore resources
-live in a company account with tighter controls, while the public endpoint lives
-in the operator's own account, where exposing a function URL is not a
-governance question.
+Everything sits in the **same account** as AgentCore Identity — no cross-account
+trust:
 
 ```
-OPERATOR account                        AGENT account
-├── lark-session-binding  (Lambda)      ├── feishu-mcp-workload   (workload identity)
-├── function URL, AuthType NONE         ├── feishu-oauth-provider (credential provider)
-├── LarkSessionBindingLambdaRole        ├── LarkCliMcpSessionBindingRole
-│     • sts:AssumeRole → that role only │     • trusts the operator Lambda role
-│     • logs to its OWN log group only  │       + ExternalId
-└── /aws/lambda/lark-session-binding    │     • CompleteResourceTokenAuth (scoped)
-                                        │     • GetSecretValue on the provider
-                                        │       secret only
-                                        └── the AgentCore runtime
+├── CloudFront distribution      ← the only public entry point, fronted by WAF
+│     └── origin access control  ← signs requests to the origin with SigV4
+├── WAF WebACL                   ← rate limiting + AWS managed rule sets
+├── lark-session-binding (Lambda)
+│     └── function URL           ← AuthType AWS_IAM; resource policy allows only
+│                                  cloudfront.amazonaws.com for this distribution
+├── LarkSessionBindingLambdaRole
+│     • CompleteResourceTokenAuth (one workload identity, one provider)
+│     • GetSecretValue (that provider's secret only)
+│     • writes to its own log group only
+└── the CloudFront domain added to feishu-mcp-workload's
+    allowedResourceOauth2ReturnUrls
 ```
 
-The trust policy is the only link between the accounts. Neither writes logs into
-the other: the Lambda role's `logs:*` grant names its own log group ARN, so a
-cross-account write is denied by IAM rather than merely unconfigured.
+**Why single-account.** An earlier revision put the Lambda in the operator's own
+account and reached `CompleteResourceTokenAuth` through a cross-account role
+(token vaults carry no resource policy, so that is the only route). Internal
+security scanners flag that trust policy as allowing assumption by a principal
+outside the organization. Deploying in one account removes the problem entirely,
+along with `AssumeRole`, `ExternalId`, and two environment variables.
 
-A cross-account role is required, not a style choice — token vaults carry no
-resource policy, so `CompleteResourceTokenAuth` cannot be granted across
-accounts directly. Deploying the Lambda into the agent account instead removes
-the trust relationship and the `AssumeRole` hop entirely; the handler works
-unchanged, just drop `AGENTCORE_ASSUME_ROLE_ARN`/`AGENTCORE_EXTERNAL_ID` and
-grant the two permissions to the execution role.
+If the Lambda genuinely has to live apart from the Token Vault, one change in
+`handler.py` covers it — assume a scoped role and build the client from those
+credentials — but expect the trust policy to be flagged.
 
 ## Security model
 
-A function URL serving browser redirects must be `AuthType: NONE` — a redirect
-cannot carry a SigV4 signature. Everything below compensates for that.
+A browser redirect cannot carry SigV4, so the outermost hop has to be
+unauthenticated. These layers stand in for it.
 
 | Layer | What it stops |
 |---|---|
-| Unguessable path segment | Scans of the `lambda-url.*.on.aws` namespace; wrong path returns a bare 404 that reveals nothing |
+| CloudFront + OAC | A direct request to the function URL returns 403. The resource policy has no wildcard principal — only `cloudfront.amazonaws.com` with `AWS:SourceArn` pinned to one distribution |
+| WAF | Rate limiting (100 req/5 min per IP) plus the AWS managed CommonRuleSet and KnownBadInputs |
+| Unguessable path segment | Scans of the distribution; anything else returns a bare 404 that reveals nothing |
 | HMAC-signed `customState` | Requests this deployment did not initiate. AWS [recommends this explicitly](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/oauth2-authorization-url-session-binding.html): only the sidecar holds the key |
 | 10-minute state TTL | Replay of an old redirect. The timestamp is inside the signed material, so it cannot be advanced |
-| Least-privilege assumed role | A full compromise of the Lambda still cannot read a token or start an authorization — only bind a session that a real login already produced |
-| `ExternalId` on the trust policy | Anyone who learns the role ARN but not the shared value |
+| Least-privilege execution role | A full compromise of the Lambda still cannot read a token or start an authorization — only bind a session a real login already produced |
+
+CloudFront in front of a Lambda function URL with OAC is the shape AWS itself
+prescribes: Security Hub control
+[CloudFront.16](https://docs.aws.amazon.com/securityhub/latest/userguide/cloudfront-controls.html)
+*requires* OAC for Lambda function URL origins.
 
 **What is deliberately not implemented.** The AWS sample verifies that the user
 who *started* the authorization is the user *completing* it, by reading a browser
@@ -330,21 +334,20 @@ the session-binding doc linked above.
 runtime's environment variables, so anyone who can read either configuration can
 forge a state. Exploiting that still requires an unexpired `session_id`, which
 means completing a Feishu login first. Deployments that care can move both sides
-to Secrets Manager (the secret supports a cross-account resource policy) at the
-cost of a lookup on each side.
+to Secrets Manager at the cost of a lookup on each side.
 
 ## Deploy
 
 `./deploy.sh` provisions everything and prints the two values to set on the
-runtime. It is idempotent — safe to re-run after changing a policy.
+runtime. It is idempotent — safe to re-run after changing a policy or the handler.
 
 ```sh
-export OPERATOR_PROFILE=self           # account hosting the Lambda
-export AGENT_PROFILE=default           # account with AgentCore Identity
-./deploy.sh
+cd deploy/session-binding
+./deploy.sh                # uses the current AWS profile; AWS_REGION defaults to us-east-1
 ```
 
-Then apply the printed environment variables to the runtime:
+A new distribution takes 5-10 minutes to reach `Deployed`. Then apply the printed
+environment variables to the runtime:
 
 ```sh
 aws bedrock-agentcore-control update-agent-runtime \
@@ -353,18 +356,17 @@ aws bedrock-agentcore-control update-agent-runtime \
   ... # plus the other required update-agent-runtime arguments
 ```
 
-Both must be set. `AGENTCORE_RETURN_URL` alone sends the browser to the Lambda
+Both must be set. `AGENTCORE_RETURN_URL` alone sends the browser to CloudFront
 with no state to verify, and every callback is rejected.
 
 To verify, call `lark_auth_start` and complete the login: the browser should end
-on "Feishu authorization complete", and `lark_exec` should work without any call
-to `lark_auth_complete`.
+on "Feishu authorization complete", `lark_exec` should work without any call to
+`lark_auth_complete`, and a direct request to the function URL should return 403.
 
 ## Rollback
 
 Point the runtime back at the loopback listener by clearing the two variables.
-The manual flow resumes immediately; nothing else needs to change, and the
-Lambda can be left in place or deleted.
+The manual flow resumes immediately; nothing else needs to change.
 
 ```sh
 aws bedrock-agentcore-control update-agent-runtime \
@@ -375,24 +377,27 @@ aws bedrock-agentcore-control update-agent-runtime \
 
 | File | Purpose |
 |---|---|
-| `handler.py` | The Lambda: verifies the request, assumes the cross-account role, calls `CompleteResourceTokenAuth`, renders the result page |
-| `deploy.sh` | Provisions both accounts' IAM, the Lambda, its function URL, and the return-URL allowlist entry |
+| `handler.py` | The Lambda: verifies the request, calls `CompleteResourceTokenAuth`, renders the result page |
+| `deploy.sh` | Provisions the IAM role, Lambda, function URL, OAC, WAF, CloudFront, and the return-URL allowlist entry |
 
-The IAM policies live as heredocs inside `deploy.sh` rather than as separate JSON
-files, since they interpolate account IDs, the region, and the provider's secret
-ARN. `grep -n 'Sid' deploy.sh` lists all four.
+The IAM policies and WAF rules live as heredocs inside `deploy.sh` rather than as
+separate JSON files, since they interpolate the account ID, region, and the
+provider's secret ARN. `grep -n 'Sid' deploy.sh` lists them.
 
 ## Troubleshooting
 
-Failures land in the Lambda's own log group (`/aws/lambda/lark-session-binding`
-in the operator account). The browser only ever sees a generic message.
+Failures land in the Lambda's own log group
+(`/aws/lambda/lark-session-binding`). The browser only ever sees a generic
+message.
 
 | Symptom | Cause |
 |---|---|
-| Function URL returns 403 for every request | Since October 2025 an `AuthType: NONE` URL needs **both** `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction` in the resource policy. `deploy.sh` adds both |
+| Direct request to the function URL returns 403 | **Expected.** With OAC in place only CloudFront can invoke it |
+| Requests *through* CloudFront also return 403 | The `AWS:SourceArn` in the resource policy does not match the distribution, or the function URL's `AuthType` is not `AWS_IAM`; re-run `deploy.sh` |
+| CloudFront returns 502/503 | The distribution is still `InProgress`, or the origin request policy is not `AllViewerExceptHostHeader` (the origin rejects the signature if it receives CloudFront's Host header) |
 | `state rejected: state signature mismatch` | `AGENTCORE_STATE_SECRET` differs between the runtime and the Lambda |
 | `state rejected: malformed state` | The runtime has no `AGENTCORE_STATE_SECRET`, so it is not sending a state at all |
-| `AccessDenied` on `sts:AssumeRole` | The trust policy or `ExternalId` does not match; re-run `deploy.sh` |
-| `AccessDeniedException ... secretsmanager:GetSecretValue` | The assumed role cannot read the provider's client secret, which `CompleteResourceTokenAuth` needs internally to redeem the code |
+| `AccessDeniedException ... secretsmanager:GetSecretValue` | The execution role cannot read the provider's client secret, which `CompleteResourceTokenAuth` needs internally to redeem the code |
 | `AccessDeniedException: Invalid or expired session` | The session URI was already consumed or is older than 10 minutes. Start over with `lark_auth_start` |
 | Browser shows `authorizationCode ... must not be null` | `AGENTCORE_RETURN_URL` is pointing at hop 1's callback instead of this endpoint |
+| The callback page gets cached | The cache policy must be `CachingDisabled`; `session_id` is single-use, and a cached response makes the replay fail |

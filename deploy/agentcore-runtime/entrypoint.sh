@@ -33,7 +33,8 @@ fi
   --key-file "$SIDECAR_KEY_FILE" &
 sidecar_pid=$!
 
-deadline=$(( $(date +%s) + SIDECAR_READY_TIMEOUT_S ))
+now="$(date +%s)"
+deadline=$(( now + SIDECAR_READY_TIMEOUT_S ))
 until curl -sS -o /dev/null "http://${SIDECAR_LISTEN}/"; do
   if ! kill -0 "$sidecar_pid" 2>/dev/null; then
     echo "entrypoint: sidecar process exited before becoming ready" >&2
