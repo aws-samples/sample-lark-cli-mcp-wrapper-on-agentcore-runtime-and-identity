@@ -1453,10 +1453,13 @@ Expected: 编译成功。
 
 - [ ] **Step 2: 确认 lark-cli 已有 app 配置（config init，走真实 App ID，不需要 App Secret 因为 sidecar 模式下 AppSecret 是 `NoAppSecret` 占位）**
 
-先确认要用哪个 App ID——复用之前 `~/.mcp.json` 里飞书自建应用的 App ID（同一个已经建好 provider 的应用）：
+先确认要用哪个 App ID——必须是已经建好 provider 的那个飞书自建应用（和 credential provider
+里 `clientId` 同一个应用，否则签名用的应用和 vault 里 token 所属的应用不一致）：
 
 ```bash
-/tmp/lark-cli-sandbox config init --app-id cli_a93bd889cfb91cc9 --brand feishu --non-interactive 2>&1 || \
+export LARKSUITE_CLI_APP_ID="cli_xxxxxxxxxxxxxxxx"   # 你自己飞书应用的 App ID
+
+/tmp/lark-cli-sandbox config init --app-id "$LARKSUITE_CLI_APP_ID" --brand feishu --non-interactive 2>&1 || \
 /tmp/lark-cli-sandbox config init
 ```
 
@@ -1476,7 +1479,7 @@ sleep 1
 ```bash
 export LARKSUITE_CLI_AUTH_PROXY="http://127.0.0.1:16385"
 export LARKSUITE_CLI_PROXY_KEY="$(cat ~/.lark-sidecar-agentcore/proxy.key)"
-export LARKSUITE_CLI_APP_ID="cli_a93bd889cfb91cc9"
+export LARKSUITE_CLI_APP_ID="cli_xxxxxxxxxxxxxxxx"   # 你自己飞书应用的 App ID
 export LARKSUITE_CLI_BRAND="feishu"
 export LARKSUITE_CLI_DEFAULT_AS="user"
 
@@ -1920,7 +1923,7 @@ Expected: 编译成功。
 export LARK_CLI_BIN_PATH=/tmp/lark-cli-sandbox
 export LARKSUITE_CLI_AUTH_PROXY="http://127.0.0.1:16385"
 export LARKSUITE_CLI_PROXY_KEY="$(cat ~/.lark-sidecar-agentcore/proxy.key)"
-export LARKSUITE_CLI_APP_ID="cli_a93bd889cfb91cc9"
+export LARKSUITE_CLI_APP_ID="cli_xxxxxxxxxxxxxxxx"   # 你自己飞书应用的 App ID
 export LARKSUITE_CLI_BRAND="feishu"
 export LARKSUITE_CLI_DEFAULT_AS="user"
 
@@ -2210,7 +2213,7 @@ sleep 1
 export LARK_CLI_BIN_PATH=/tmp/lark-cli-sandbox
 export LARKSUITE_CLI_AUTH_PROXY="http://127.0.0.1:16385"
 export LARKSUITE_CLI_PROXY_KEY="$(cat ~/.lark-sidecar-agentcore/proxy.key)"
-export LARKSUITE_CLI_APP_ID="cli_a93bd889cfb91cc9"
+export LARKSUITE_CLI_APP_ID="cli_xxxxxxxxxxxxxxxx"   # 你自己飞书应用的 App ID
 export LARKSUITE_CLI_BRAND="feishu"
 export LARKSUITE_CLI_DEFAULT_AS="user"
 /tmp/lark-mcp-wrapper &
