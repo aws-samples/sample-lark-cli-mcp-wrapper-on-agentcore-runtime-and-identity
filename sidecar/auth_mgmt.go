@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockagentcore"
@@ -62,14 +63,23 @@ func (a *authMgmt) handleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out, err := a.client.GetResourceOauth2Token(r.Context(), &bedrockagentcore.GetResourceOauth2TokenInput{
+	input := &bedrockagentcore.GetResourceOauth2TokenInput{
 		WorkloadIdentityToken:          aws.String(workloadToken),
 		ResourceCredentialProviderName: aws.String(a.cfg.CredentialProviderID),
 		Scopes:                         a.cfg.Scopes,
 		Oauth2Flow:                     types.Oauth2FlowTypeUserFederation,
 		ResourceOauth2ReturnUrl:        aws.String(a.cfg.ReturnURL),
 		ForceAuthentication:            aws.Bool(true),
-	})
+	}
+	// AgentCore Identity echoes CustomState back to the return URL as a query
+	// parameter, which is how a publicly reachable session-binding endpoint can
+	// tell a genuine callback from an unsolicited request. Only sent when a
+	// shared secret is configured; the loopback listener does not need it.
+	if secret := stateSecret(); secret != nil {
+		input.CustomState = aws.String(signState(secret, time.Now()))
+	}
+
+	out, err := a.client.GetResourceOauth2Token(r.Context(), input)
 	if err != nil {
 		jsonMgmtError(w, http.StatusBadGateway, "GetResourceOauth2Token failed: "+err.Error())
 		return
@@ -82,7 +92,12 @@ func (a *authMgmt) handleStart(w http.ResponseWriter, r *http.Request) {
 	} else if out.AuthorizationUrl != nil {
 		resp["authorization_url"] = *out.AuthorizationUrl
 		resp["session_uri"] = aws.ToString(out.SessionUri)
-		a.logf("AUTH_START authorization_url=%s session_uri=%s", *out.AuthorizationUrl, aws.ToString(out.SessionUri))
+		// Lets the MCP wrapper tell the caller whether the binding completes on
+		// its own after login, or whether it still has to pass session_id to
+		// lark_auth_complete.
+		resp["self_hosted_session_binding"] = selfHostedSessionBinding(a.cfg)
+		a.logf("AUTH_START authorization_url=%s session_uri=%s self_hosted_binding=%v",
+			*out.AuthorizationUrl, aws.ToString(out.SessionUri), selfHostedSessionBinding(a.cfg))
 	} else {
 		jsonMgmtError(w, http.StatusInternalServerError, "GetResourceOauth2Token returned neither AccessToken nor AuthorizationUrl")
 		return

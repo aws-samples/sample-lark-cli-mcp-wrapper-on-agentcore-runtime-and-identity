@@ -18,6 +18,15 @@ SIDECAR_CALLBACK_LISTEN="${SIDECAR_CALLBACK_LISTEN:-127.0.0.1:3000}"
 SIDECAR_KEY_FILE="${SIDECAR_KEY_FILE:-/tmp/lark-sidecar-agentcore/proxy.key}"
 SIDECAR_READY_TIMEOUT_S="${SIDECAR_READY_TIMEOUT_S:-10}"
 
+# Deployment-specific, so it has no default: this must be the app ID whose
+# client credentials back the AgentCore Identity credential provider, or
+# lark-cli signs requests as a different app than the one the vaulted token was
+# issued for. Set it on the runtime alongside the AGENTCORE_* variables.
+if [ -z "${LARKSUITE_CLI_APP_ID:-}" ]; then
+  echo "entrypoint: LARKSUITE_CLI_APP_ID is required (the Feishu app ID, e.g. cli_xxxxxxxxxxxxxxxx)" >&2
+  exit 1
+fi
+
 /usr/local/bin/sidecar-agentcore-identity \
   --listen "$SIDECAR_LISTEN" \
   --callback-listen "$SIDECAR_CALLBACK_LISTEN" \
@@ -39,7 +48,6 @@ done
 
 export LARKSUITE_CLI_AUTH_PROXY="http://${SIDECAR_LISTEN}"
 export LARKSUITE_CLI_PROXY_KEY="$(cat "$SIDECAR_KEY_FILE")"
-export LARKSUITE_CLI_APP_ID="${LARKSUITE_CLI_APP_ID:-cli_a93bd889cfb91cc9}"
 export LARKSUITE_CLI_BRAND="${LARKSUITE_CLI_BRAND:-feishu}"
 export LARKSUITE_CLI_DEFAULT_AS="${LARKSUITE_CLI_DEFAULT_AS:-user}"
 export LARK_CLI_BIN_PATH="${LARK_CLI_BIN_PATH:-/usr/local/bin/lark-cli}"

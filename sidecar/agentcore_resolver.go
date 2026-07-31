@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,6 +25,23 @@ func getenvOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// defaultLoopbackReturnURL is the session-binding URL used when
+// AGENTCORE_RETURN_URL is unset: the sidecar's own loopback callback listener
+// (see main.go's --callback-listen). Reachable only from the same machine, so
+// it completes the flow automatically during local development and falls back
+// to manual session_id entry once deployed.
+const defaultLoopbackReturnURL = "http://localhost:3000/callback"
+
+// selfHostedSessionBinding reports whether this deployment has an external
+// session-binding endpoint configured, i.e. whether the browser can be expected
+// to land somewhere that completes the binding on its own. Drives the guidance
+// lark_auth_start returns, so the caller is told to wait for the redirect
+// rather than to collect a session_id (or the reverse) based on what is
+// actually deployed.
+func selfHostedSessionBinding(cfg agentcoreConfig) bool {
+	return cfg.ReturnURL != defaultLoopbackReturnURL
 }
 
 // agentcoreConfig holds the fixed identifiers for this single-user deployment.
@@ -50,19 +68,40 @@ func defaultAgentcoreConfig() agentcoreConfig {
 		// real person's name; override via AGENTCORE_USER_ID for any other
 		// single-tenant deployment.
 		UserID: getenvOr("AGENTCORE_USER_ID", "bot"),
-		// Must match both the workload identity's allowedResourceOauth2ReturnUrls
-		// allowlist (an AWS-side config already granted for this exact URL) and
-		// the dedicated callback listener started in main.go (default
-		// 127.0.0.1:3000): the browser is redirected here automatically after
-		// Feishu login, so handleCallback can complete the binding without a
-		// human copying session_id out of the address bar.
-		// Plain HTTP to localhost only. This is a loopback redirect target on
-		// the same machine, not a network hop; TLS would add no protection
-		// against an on-machine attacker that plain HTTP doesn't already lack,
-		// and the return-URL allowlist is an exact-match AWS-side config
-		// already granted for this string.
+		// The OAuth2 "session binding URL" — the *second* redirect hop, where
+		// AgentCore Identity sends the browser after it has exchanged Feishu's
+		// authorization code. Whatever value is used must appear in the
+		// workload identity's allowedResourceOauth2ReturnUrls allowlist.
+		//
+		// Not interchangeable with the credential provider's own callbackUrl
+		// (the one registered as the Feishu app's redirect URL). That is the
+		// *first* hop's entry point: it expects Feishu to arrive carrying
+		// authorizationCode and state, and rejects a bare browser visit with
+		// "2 validation errors detected: Value at 'authorizationCode' failed to
+		// satisfy constraint: Member must not be null; Value at 'state' failed
+		// to satisfy constraint: Member must not be null". Verified 2026-07-31
+		// by pointing ReturnURL at it — the API accepts the URL once it is
+		// allowlisted, so the mistake only surfaces when a human actually
+		// completes a login.
+		//
+		// The default is the loopback listener started in main.go, which only
+		// works when the browser and the sidecar share a machine — true for
+		// local development, false on AgentCore Runtime. Deployments there set
+		// AGENTCORE_RETURN_URL to a publicly reachable endpoint that calls
+		// CompleteResourceTokenAuth itself; see deploy/session-binding/.
+		// Without it the flow still completes, just manually: the redirect
+		// fails to load and the operator hands session_id to
+		// lark_auth_complete. AWS documents this split — on Runtime "your web
+		// application ... must host a publicly accessible HTTPS callback
+		// endpoint itself", while the local CLI "hosts the callback endpoint
+		// and calls the CompleteResourceTokenAuth API on your behalf".
+		//
+		// Plain HTTP is safe for the loopback default specifically: it is a
+		// same-machine redirect target, not a network hop, so TLS would add no
+		// protection an on-machine attacker doesn't already have. Any override
+		// is expected to be HTTPS.
 		// nosemgrep: use-tls
-		ReturnURL: "http://localhost:3000/callback",
+		ReturnURL: getenvOr("AGENTCORE_RETURN_URL", defaultLoopbackReturnURL),
 		// Full scope set for Task 9's calendar/docs verification. Each
 		// scope was independently confirmed to authorize cleanly (302 to
 		// Feishu's login page, verified via direct curl against the
@@ -74,12 +113,42 @@ func defaultAgentcoreConfig() agentcoreConfig {
 		// property of any scope string. calendar:* scopes obtained from
 		// `calendar +agenda`'s missing_scope error; docx:* scopes
 		// obtained from `docs +create`'s missing_scope error.
-		Scopes: []string{
+		//
+		// Deliberately excludes offline_access, which is what would make
+		// AgentCore Identity's refresh path work: Feishu only returns a
+		// refresh_token when the app has that permission enabled in the
+		// developer console AND declares it in scope (see
+		// https://open.feishu.cn/document/authentication-management/
+		// access-token/refresh-user-access-token). Without it every token is a
+		// bare 2-hour one and re-authorization is needed after it expires,
+		// which is what the audit log showed for 07-19 through 07-30. Left out
+		// for now on purpose, to keep exercising the interactive flow while the
+		// session-binding path is still being validated; add it back once that
+		// is settled. Set AGENTCORE_EXTRA_SCOPES=offline_access to opt in
+		// without a rebuild.
+		Scopes: append(extraScopes(), []string{
 			"im:message", "im:chat:readonly",
 			"calendar:calendar:readonly", "calendar:calendar", "calendar:calendar.event:read",
 			"docx:document", "docx:document:create",
-		},
+		}...),
 	}
+}
+
+// extraScopes returns the scopes named in AGENTCORE_EXTRA_SCOPES (comma or
+// space separated), so a deployment can request additional Feishu permissions
+// — offline_access in particular — without rebuilding the image.
+func extraScopes() []string {
+	raw := os.Getenv("AGENTCORE_EXTRA_SCOPES")
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, s := range strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == ' ' }) {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 type cachedToken struct {
@@ -112,6 +181,7 @@ func newAgentcoreTokenResolver(ctx context.Context, cfg agentcoreConfig, logf fu
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
+	logf("RETURN_URL url=%s", cfg.ReturnURL)
 	return &agentcoreTokenResolver{
 		client: bedrockagentcore.NewFromConfig(awsCfg),
 		cfg:    cfg,

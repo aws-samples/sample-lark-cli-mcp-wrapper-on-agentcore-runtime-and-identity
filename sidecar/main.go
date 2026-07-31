@@ -139,9 +139,13 @@ func run(ctx context.Context, listen, callbackListen, keyFile, logFile string) e
 		allowedIDs:   allowedIDs,
 	}
 
+	// resolver.cfg, not agentcoreCfg: the constructor resolves ReturnURL from
+	// the credential provider when it was left unset, and handleStart must send
+	// the same value ResolveToken does or the two flows disagree on the
+	// allowlisted return URL.
 	mgmt := &authMgmt{
 		client:   resolver.client,
-		cfg:      agentcoreCfg,
+		cfg:      resolver.cfg,
 		resolver: resolver,
 		logf:     auditLogger.Printf,
 	}

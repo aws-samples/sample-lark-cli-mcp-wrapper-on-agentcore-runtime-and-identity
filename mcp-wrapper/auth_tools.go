@@ -101,13 +101,10 @@ type larkAuthStartArgs struct{}
 // larkAuthStartHandler begins a fresh Feishu 3LO authorization and returns the
 // authorization URL plus the session_id needed to finish the binding.
 //
-// The return URL registered for this deployment points at the sidecar's
-// container-local loopback listener, which the operator's browser cannot
-// reach. That is not a problem: AgentCore Identity appends session_id to the
-// redirect, so the browser's address bar carries the value even when the page
-// itself fails to load. The operator copies that session_id back and calls
-// lark_auth_complete — completion only needs the session URI, not a reachable
-// return URL.
+// session_id is returned here, up front, because that is all
+// lark_auth_complete needs — it binds by session URI, and never reads anything
+// back out of the browser. The operator only has to complete the login; the
+// caller already holds every value required to finish.
 func larkAuthStartHandler(ctx context.Context, req *mcp.CallToolRequest, args larkAuthStartArgs) (*mcp.CallToolResult, map[string]any, error) {
 	out, err := postSidecar(ctx, "/_sidecar/auth/start", nil)
 	if err != nil {
@@ -128,16 +125,40 @@ func larkAuthStartHandler(ctx context.Context, req *mcp.CallToolRequest, args la
 		result["authorization_url_without_scheme"] = noScheme
 		result["request_uri"] = requestURI
 		result["session_id"] = sessionURI
-		result["next_step"] = strings.Join([]string{
-			"1. Open the authorization URL in a browser and complete the Feishu login.",
-			"   If 'authorization_url' above reads '<redacted>', the transport filtered it:",
-			"   take 'authorization_url_without_scheme' and prepend 'https://' instead.",
-			"2. The browser will be redirected to a localhost address that fails to load.",
-			"   That failure is expected. Copy the 'session_id' query parameter out of the",
-			"   browser's address bar (it starts with 'urn:ietf:params:oauth:request_uri:').",
-			"3. Call lark_auth_complete with that value within about 5 minutes,",
-			"   since the underlying OAuth authorization code is short-lived.",
+		openURL := strings.Join([]string{
+			"1. Ask the operator to open the authorization URL in a browser and",
+			"   complete the Feishu login. If 'authorization_url' above reads",
+			"   '<redacted>', the transport filtered it: take",
+			"   'authorization_url_without_scheme' and prepend 'https://' instead.",
 		}, "\n")
+
+		// Two deployment shapes, two different next steps. With an external
+		// session-binding endpoint the browser lands somewhere that completes
+		// the binding itself, so calling lark_auth_complete would be redundant
+		// (and would fail, the session already being consumed). Without one the
+		// redirect goes to a loopback address the browser cannot reach, and the
+		// binding has to be completed from here.
+		if selfHosted, _ := out["self_hosted_session_binding"].(bool); selfHosted {
+			result["session_binding"] = "automatic"
+			result["next_step"] = openURL + "\n" + strings.Join([]string{
+				"2. The browser lands on a page confirming the authorization is",
+				"   complete. Nothing needs to be copied out of it.",
+				"3. Do NOT call lark_auth_complete — the binding is already done.",
+				"   Verify with lark_exec instead, e.g. 'im +chat-list --as user",
+				"   --page-size 3'.",
+			}, "\n")
+		} else {
+			result["session_binding"] = "manual"
+			result["next_step"] = openURL + "\n" + strings.Join([]string{
+				"2. Once they confirm the login is done, call lark_auth_complete with",
+				"   the 'session_id' value returned above. Do not ask the operator for",
+				"   a session_id — it is already in this response, and nothing needs to",
+				"   be read out of the browser. The redirect at the end of the login",
+				"   fails to load; that is expected and does not affect anything.",
+				"3. Call it within about 5 minutes of the login, since the underlying",
+				"   OAuth authorization code is short-lived.",
+			}, "\n")
+		}
 	}
 
 	resultJSON, err := json.Marshal(result)
