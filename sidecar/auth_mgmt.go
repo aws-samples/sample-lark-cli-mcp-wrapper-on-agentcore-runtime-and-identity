@@ -23,7 +23,7 @@ import (
 // operator directly via curl on the same machine running the sidecar, which
 // is itself the trust boundary (see docs/AGENTCORE_IDENTITY_MCP_PLAN.md Task 3).
 type authMgmt struct {
-	client   *bedrockagentcore.Client
+	client   agentcoreIdentityAPI
 	cfg      agentcoreConfig
 	resolver *agentcoreTokenResolver
 	logf     func(format string, args ...any)

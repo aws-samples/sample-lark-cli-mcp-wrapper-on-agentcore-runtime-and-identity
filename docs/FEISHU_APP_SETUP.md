@@ -90,6 +90,29 @@ https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/<uu
 改动这份列表要同时改 `sidecar/agentcore_resolver.go` 里的 `Scopes`。注意 Token Vault 的
 槽位是按 scope 列表分键的，所以增删 scope 会让已有授权失效，需要重新走一次浏览器授权。
 
+### 要用 `--as bot` 的话：还得勾「应用身份」栏
+
+开放平台里同一个权限分「用户身份」和「应用身份」两栏，**是分别开通的**。上面那 7 个勾在用户
+身份栏只让 `--as user` 能用；`--as bot` 走的是 M2M（client credentials）flow，读的是**应用
+身份**栏。
+
+默认 bot 请求的 scope 和用户身份那套一样（但不含 `AGENTCORE_EXTRA_SCOPES`，`offline_access`
+对应用身份没有意义）。两边不一致时用 `AGENTCORE_BOT_SCOPES` 单独指定 bot 要哪些。
+
+只勾了用户身份栏就调 `--as bot`，症状是 `GetResourceOauth2Token (M2M) returned no
+AccessToken`。同样**改完要发版**。
+
+### 要发外部（跨租户）群：额外开 External sharing
+
+外部群只认应用身份 —— 用户身份发消息会被拒（`230027`），换 `--as bot` 才通。除此之外还要在
+开放平台的**机器人**配置页开 **External sharing** → 勾「允许机器人加入外部群」，然后发版。
+不开的话机器人在客户端「添加机器人」列表里根本不出现。
+
+「允许外部用户发起单聊」是另一件事（管的是*外部用户主动私聊机器人*），发外部群不需要它。
+
+注意跨租户**单聊**是飞书平台禁的，换什么身份都不行，错误码 `230038 cross tenant p2p chat
+operate forbid`。要跨租户发消息只能走外部群。
+
 ### 可选：`offline_access`（强烈建议开）
 
 不开这个权限，飞书只发 2 小时有效期的 access token，**每 2 小时就要重新走一次浏览器授权**。
@@ -128,6 +151,9 @@ https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/<uu
 | 现象 | 原因 |
 |---|---|
 | `missing_scope` | 权限没勾，或勾了但没发版（见第 4 步）；也可能勾在了"应用身份"栏而不是"用户身份"栏 |
+| `GetResourceOauth2Token (M2M) returned no AccessToken` | `--as bot` 要的权限没在"应用身份"栏勾，或勾了没发版 |
+| 发外部群报 `230027` | 用了 `--as user`。外部群只认应用身份，换 `--as bot`；另需开 External sharing 并发版 |
+| 跨租户单聊报 `230038` | 平台限制，任何身份都不行。改走外部群 |
 | 授权页报 redirect URL 不匹配 | 第 2 步的 URL 没填、填错，或 provider 重建过导致 UUID 变了 |
 | 每 2 小时就要重新授权 | `offline_access` 没开通，或没设 `AGENTCORE_EXTRA_SCOPES` |
 | 授权成功但 `lark_exec` 报 `authorization required` | `LARKSUITE_CLI_APP_ID` 和 provider 里的 `clientId` 不是同一个应用 |
@@ -169,3 +195,15 @@ before deploying. All console-only — no API automates them.
 
 Adding or removing scopes re-keys the Token Vault slot, so it invalidates the
 existing authorization and needs one more browser login.
+
+**For `--as bot`**, enable the same permissions under the *app identity* column
+too — the console grants the two columns independently, and the M2M flow reads
+the app one. Use `AGENTCORE_BOT_SCOPES` when the two sets differ. Missing app
+permissions surface as `GetResourceOauth2Token (M2M) returned no AccessToken`.
+
+**To post into external (cross-tenant) groups**, bot identity is mandatory: a
+user-identity send is refused with `230027`. Also turn on **External sharing →
+allow the bot to join external groups** on the bot config page, then publish —
+without it the bot never appears in the client's "add bot" list. Cross-tenant
+*direct* messages are blocked by the platform for every identity (`230038 cross
+tenant p2p chat operate forbid`); an external group is the only route.

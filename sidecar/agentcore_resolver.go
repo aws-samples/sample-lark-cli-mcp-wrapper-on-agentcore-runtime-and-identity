@@ -17,6 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockagentcore"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockagentcore/types"
+	"github.com/larksuite/cli/sidecar"
 )
 
 // getenvOr returns the environment variable's value, or fallback if unset/empty.
@@ -54,6 +55,12 @@ type agentcoreConfig struct {
 	UserID               string
 	ReturnURL            string
 	Scopes               []string
+	// BotScopes are requested for the app-only ("bot") token instead of
+	// Scopes. They are a separate list because Feishu grants app-identity and
+	// user-identity permissions independently in the developer console, and
+	// because user-only scopes (offline_access) are meaningless for a token
+	// that is minted from client credentials on every expiry.
+	BotScopes []string
 }
 
 func defaultAgentcoreConfig() agentcoreConfig {
@@ -126,19 +133,44 @@ func defaultAgentcoreConfig() agentcoreConfig {
 		// session-binding path is still being validated; add it back once that
 		// is settled. Set AGENTCORE_EXTRA_SCOPES=offline_access to opt in
 		// without a rebuild.
-		Scopes: append(extraScopes(), []string{
-			"im:message", "im:chat:readonly",
-			"calendar:calendar:readonly", "calendar:calendar", "calendar:calendar.event:read",
-			"docx:document", "docx:document:create",
-		}...),
+		Scopes:    append(extraScopes(), baseScopes()...),
+		BotScopes: botScopes(),
 	}
+}
+
+// baseScopes is the permission set both identities start from. Returned fresh
+// on every call so callers can append to it without sharing a backing array.
+func baseScopes() []string {
+	return []string{
+		"im:message", "im:chat:readonly",
+		"calendar:calendar:readonly", "calendar:calendar", "calendar:calendar.event:read",
+		"docx:document", "docx:document:create",
+	}
+}
+
+// botScopes returns the scopes requested for the app-only token. Defaults to
+// baseScopes without AGENTCORE_EXTRA_SCOPES applied: offline_access, the scope
+// that env var exists for, only affects the 3LO refresh path and is rejected
+// as unknown authority for a client-credentials grant. Override the whole list
+// with AGENTCORE_BOT_SCOPES (comma or space separated) when the app's
+// app-identity permissions differ from its user-identity ones — which is the
+// common case, since the developer console grants the two independently.
+func botScopes() []string {
+	if raw := os.Getenv("AGENTCORE_BOT_SCOPES"); raw != "" {
+		return splitScopes(raw)
+	}
+	return baseScopes()
 }
 
 // extraScopes returns the scopes named in AGENTCORE_EXTRA_SCOPES (comma or
 // space separated), so a deployment can request additional Feishu permissions
 // — offline_access in particular — without rebuilding the image.
 func extraScopes() []string {
-	raw := os.Getenv("AGENTCORE_EXTRA_SCOPES")
+	return splitScopes(os.Getenv("AGENTCORE_EXTRA_SCOPES"))
+}
+
+// splitScopes parses a comma or space separated scope list, dropping empties.
+func splitScopes(raw string) []string {
 	if raw == "" {
 		return nil
 	}
@@ -156,22 +188,47 @@ type cachedToken struct {
 	expiresAt time.Time
 }
 
+// agentcoreIdentityAPI is the slice of AgentCore Identity this resolver calls,
+// named as an interface so tests can assert which OAuth2 flow and scopes each
+// wire-protocol identity resolves with without reaching AWS.
+// *bedrockagentcore.Client satisfies it.
+type agentcoreIdentityAPI interface {
+	GetWorkloadAccessTokenForUserId(context.Context, *bedrockagentcore.GetWorkloadAccessTokenForUserIdInput, ...func(*bedrockagentcore.Options)) (*bedrockagentcore.GetWorkloadAccessTokenForUserIdOutput, error)
+	GetResourceOauth2Token(context.Context, *bedrockagentcore.GetResourceOauth2TokenInput, ...func(*bedrockagentcore.Options)) (*bedrockagentcore.GetResourceOauth2TokenOutput, error)
+	CompleteResourceTokenAuth(context.Context, *bedrockagentcore.CompleteResourceTokenAuthInput, ...func(*bedrockagentcore.Options)) (*bedrockagentcore.CompleteResourceTokenAuthOutput, error)
+}
+
 // agentcoreTokenResolver resolves real Feishu tokens via AWS Bedrock
 // AgentCore Identity's Token Vault instead of the local OS keychain.
 //
-// Identity mapping: sidecar wire-protocol identity ("user"/"bot") maps
-// 1:1 onto a single cached token slot, since this deployment serves exactly
-// one Feishu user (see agentcoreConfig.UserID) and TAT (bot) requests are
-// minted independently from AppID+AppSecret — TAT is intentionally NOT
-// wired to AgentCore Identity in this design; only UAT (user) goes through
-// the 3LO flow. A "bot" identity request returns an error, since this
-// deployment's only registered use case is the user-token DevOps Agent path.
+// Identity mapping: both sidecar wire-protocol identities go through the Token
+// Vault, each with its own cache slot and its own OAuth2 flow.
+//
+//   - "user" resolves a user token over USER_FEDERATION (3LO). Authority is one
+//     specific person's, granted in a browser, and expiry sends the operator
+//     back to that browser unless offline_access is in scope.
+//   - "bot" resolves an app-only token over M2M, the client-credentials grant,
+//     using the client_id/client_secret already held in the credential
+//     provider. No browser, no user consent, renewable unattended.
+//
+// The two are not interchangeable. The bot token carries tenant-wide app
+// authority rather than a person's, so any caller able to reach this sidecar
+// acts as the app. It exists because Feishu gates some surfaces on app
+// identity: user tokens are refused on external (cross-tenant) chats with
+// error 230027, while the same send over an app-only token succeeds.
+//
+// Earlier revisions rejected "bot" outright, on the reasoning that a tenant
+// token is minted from AppID+AppSecret and so has no business in a vault built
+// for 3LO. That turned out to be wrong on the mechanics: Feishu's OAuth2 token
+// endpoint accepts grant_type=client_credentials, so AgentCore Identity can
+// mint the app-only token itself and the app secret never has to leave the
+// vault.
 type agentcoreTokenResolver struct {
-	client *bedrockagentcore.Client
+	client agentcoreIdentityAPI
 	cfg    agentcoreConfig
 
 	mu    sync.RWMutex
-	cache map[string]cachedToken // key: identity ("user")
+	cache map[string]cachedToken // key: identity ("user" or "bot")
 
 	logf func(format string, args ...any)
 }
@@ -190,18 +247,81 @@ func newAgentcoreTokenResolver(ctx context.Context, cfg agentcoreConfig, logf fu
 	}, nil
 }
 
-// ResolveToken implements tokenResolver. identity is "user" or "bot" from
-// the sidecar wire protocol. Only "user" is supported in this deployment.
+// ResolveToken implements tokenResolver. identity is "user" or "bot" from the
+// sidecar wire protocol; anything else is rejected rather than guessed at.
 func (r *agentcoreTokenResolver) ResolveToken(ctx context.Context, identity string) (string, error) {
-	if identity != "user" {
-		return "", fmt.Errorf("agentcoreTokenResolver: identity %q not supported (only \"user\" is wired to AgentCore Identity)", identity)
+	switch identity {
+	case sidecar.IdentityUser:
+		return r.resolveUserToken(ctx)
+	case sidecar.IdentityBot:
+		return r.resolveBotToken(ctx)
+	default:
+		return "", fmt.Errorf("agentcoreTokenResolver: identity %q not supported (want %q or %q)", identity, sidecar.IdentityUser, sidecar.IdentityBot)
 	}
+}
 
+// cachedToken returns the live cached token for identity, if any.
+func (r *agentcoreTokenResolver) cachedToken(identity string) (string, bool) {
 	r.mu.RLock()
 	cached, ok := r.cache[identity]
 	r.mu.RUnlock()
 	if ok && time.Now().Before(cached.expiresAt) {
-		return cached.token, nil
+		return cached.token, true
+	}
+	return "", false
+}
+
+// storeToken caches a token for identity, expiring it `early` before its real
+// lifetime runs out so an in-flight request cannot race the expiry.
+func (r *agentcoreTokenResolver) storeToken(identity, token string, lifetime, early time.Duration) time.Time {
+	expiresAt := time.Now().Add(lifetime - early)
+	r.mu.Lock()
+	r.cache[identity] = cachedToken{token: token, expiresAt: expiresAt}
+	r.mu.Unlock()
+	return expiresAt
+}
+
+// resolveBotToken mints an app-only token over the M2M (client-credentials)
+// grant. AgentCore Identity holds the client_id/client_secret, so no app secret
+// passes through this process. No return URL is sent: nothing here is
+// interactive, and an unauthorized caller gets an error rather than a login URL.
+func (r *agentcoreTokenResolver) resolveBotToken(ctx context.Context) (string, error) {
+	if token, ok := r.cachedToken(sidecar.IdentityBot); ok {
+		return token, nil
+	}
+
+	workloadToken, err := r.getWorkloadAccessToken(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to get workload access token: %w", err)
+	}
+
+	out, err := r.client.GetResourceOauth2Token(ctx, &bedrockagentcore.GetResourceOauth2TokenInput{
+		WorkloadIdentityToken:          aws.String(workloadToken),
+		ResourceCredentialProviderName: aws.String(r.cfg.CredentialProviderID),
+		Scopes:                         r.cfg.BotScopes,
+		Oauth2Flow:                     types.Oauth2FlowTypeM2m,
+	})
+	if err != nil {
+		return "", fmt.Errorf("GetResourceOauth2Token (M2M) failed: %w", err)
+	}
+	if out.AccessToken == nil || *out.AccessToken == "" {
+		// There is no authorization-URL fallback for M2M: a failure here means
+		// the app lacks the requested app-identity permissions, or the
+		// permission change was never published to a new app version.
+		return "", fmt.Errorf("GetResourceOauth2Token (M2M) returned no AccessToken; check that the app grants %v under app identity and that a version was published", r.cfg.BotScopes)
+	}
+
+	// Feishu app-only tokens live 2 hours, same as user tokens.
+	expiresAt := r.storeToken(sidecar.IdentityBot, *out.AccessToken, 2*time.Hour, 5*time.Minute)
+	r.logf("TOKEN_RESOLVED identity=%s flow=M2M expires_at=%s", sidecar.IdentityBot, expiresAt.Format(time.RFC3339))
+	return *out.AccessToken, nil
+}
+
+// resolveUserToken resolves the 3LO user token, driving the browser
+// authorization flow when the vault has nothing valid stored.
+func (r *agentcoreTokenResolver) resolveUserToken(ctx context.Context) (string, error) {
+	if token, ok := r.cachedToken(sidecar.IdentityUser); ok {
+		return token, nil
 	}
 
 	// Cache miss or expired: ask AgentCore Identity. If a valid refresh
@@ -238,12 +358,8 @@ func (r *agentcoreTokenResolver) ResolveToken(ctx context.Context, identity stri
 
 	// Feishu UAT lifetime is 2 hours; refresh 5 minutes early to avoid
 	// races with in-flight requests.
-	expiresAt := time.Now().Add(2*time.Hour - 5*time.Minute)
-	r.mu.Lock()
-	r.cache[identity] = cachedToken{token: *out.AccessToken, expiresAt: expiresAt}
-	r.mu.Unlock()
-
-	r.logf("TOKEN_RESOLVED identity=%s expires_at=%s", identity, expiresAt.Format(time.RFC3339))
+	expiresAt := r.storeToken(sidecar.IdentityUser, *out.AccessToken, 2*time.Hour, 5*time.Minute)
+	r.logf("TOKEN_RESOLVED identity=%s flow=USER_FEDERATION expires_at=%s", sidecar.IdentityUser, expiresAt.Format(time.RFC3339))
 	return *out.AccessToken, nil
 }
 
@@ -274,20 +390,26 @@ func (r *agentcoreTokenResolver) completeAuth(ctx context.Context, sessionURI st
 	if err != nil {
 		return err
 	}
+	// Only the user slot: completing a 3LO authorization says nothing about
+	// the app-only token, which is minted from client credentials.
 	r.mu.Lock()
-	delete(r.cache, "user")
+	delete(r.cache, sidecar.IdentityUser)
 	r.mu.Unlock()
 	return nil
 }
 
-// forceExpire evicts the cached token immediately, forcing the next
+// forceExpire evicts every cached token immediately, forcing the next
 // ResolveToken call to hit AgentCore Identity. Used by Task 5's refresh
 // verification (does NOT delete the underlying stored token/refresh_token
 // in the Token Vault — only this process's local cache — so the next call
 // exercises the exact same refresh-or-reauth decision AgentCore Identity
 // would make after natural 2-hour expiry).
+//
+// Clears both identities: a check meant to force re-resolution that quietly
+// left a stale app-only token in place would report on the user flow while
+// bot traffic kept serving from cache.
 func (r *agentcoreTokenResolver) forceExpire() {
 	r.mu.Lock()
-	delete(r.cache, "user")
+	clear(r.cache)
 	r.mu.Unlock()
 }
