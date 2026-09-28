@@ -311,6 +311,13 @@ aws bedrock-agentcore-control update-agent-runtime \
 这套东西依赖的 OAuth2 credential provider、workload identity 和 IAM role 是怎么创建的，
 见 `docs/AGENTCORE_IDENTITY_MCP_PLAN.md` 里的 AWS CLI 命令。
 
+### 部署到 AWS 中国区
+
+`cn-north-1` / `cn-northwest-1` 上这套东西源码一行不用改就能跑。要改的只有 ARN 分区、
+端点后缀，以及一个必填的 `AGENTCORE_REGION`。步骤、差异清单和几个只在中国区才会撞上的坑
+（`InvalidClientTokenId` 其实是 region 被环境变量顶掉、`NO_PROXY` 匹配不到 `.com.cn`、
+`mcp-proxy-for-aws` 的 401）见 [`docs/CHINA_REGION.md`](docs/CHINA_REGION.md)。
+
 ### 可选：session-binding endpoint
 
 要去掉手工调 `lark_auth_complete` 这一步，部署
@@ -337,7 +344,7 @@ origin access control 锁到那一个 distribution，直连返回 403。全部�
 | `deploy/agentcore-runtime/` | `linux/arm64` runtime 镜像的 Dockerfile、entrypoint 和 CodeBuild buildspec |
 | `deploy/session-binding/` | 可选：CloudFront + Lambda endpoint，自动化 OAuth 第二跳 |
 | `skills/feishu-send-message/` | 从 AWS DevOps Agent 驱动这些工具的实操示例，含可直接粘贴的 `PROMPT.md` |
-| `docs/` | 飞书应用配置步骤（`FEISHU_APP_SETUP.md`）、设计推导和逐步验证记录 |
+| `docs/` | 飞书应用配置步骤（`FEISHU_APP_SETUP.md`）、AWS 中国区部署（`CHINA_REGION.md`）、设计推导和逐步验证记录 |
 
 ---
 
@@ -691,6 +698,15 @@ See `docs/AGENTCORE_IDENTITY_MCP_PLAN.md` for the AWS CLI commands used to
 provision the OAuth2 credential provider, workload identity, and IAM roles this
 depends on.
 
+### Deploying to AWS China regions
+
+This runs on `cn-north-1` / `cn-northwest-1` with no source changes — only the ARN
+partition, the endpoint suffix, and one now-mandatory `AGENTCORE_REGION` differ. See
+[`docs/CHINA_REGION.md`](docs/CHINA_REGION.md) for the steps, the full diff against a
+global region, and the traps that only surface there (`InvalidClientTokenId` that is
+really an environment variable overriding your region, `NO_PROXY` failing to match
+`.com.cn`, and a 401 from `mcp-proxy-for-aws`).
+
 ### Optional: session-binding endpoint
 
 To remove the manual `lark_auth_complete` step, deploy the endpoint in
@@ -720,4 +736,4 @@ clearing both reverts to the manual flow.
 | `deploy/agentcore-runtime/` | Dockerfile, entrypoint, and CodeBuild buildspec for the `linux/arm64` runtime image |
 | `deploy/session-binding/` | Optional CloudFront + Lambda endpoint that automates OAuth hop 2 |
 | `skills/feishu-send-message/` | Worked example for driving the tools from AWS DevOps Agent, plus a paste-ready `PROMPT.md` |
-| `docs/` | Feishu app setup (`FEISHU_APP_SETUP.md`), design rationale, and the step-by-step verification log |
+| `docs/` | Feishu app setup (`FEISHU_APP_SETUP.md`), AWS China region deployment (`CHINA_REGION.md`), design rationale, and the step-by-step verification log |
