@@ -6,7 +6,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.43.2
 	github.com/aws/aws-sdk-go-v2/config v1.32.30
 	github.com/aws/aws-sdk-go-v2/service/bedrockagentcore v1.33.1
-	github.com/larksuite/cli v1.0.72
+	github.com/larksuite/cli v1.0.98
 )
 
 require (

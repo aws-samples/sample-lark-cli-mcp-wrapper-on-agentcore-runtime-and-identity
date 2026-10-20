@@ -30,5 +30,5 @@ github.com/aws/aws-sdk-go-v2/service/sts v1.44.1 h1:RvfHDg+xvAeZ+5741vUEjpOVtYSI
 github.com/aws/aws-sdk-go-v2/service/sts v1.44.1/go.mod h1:9gdl4RrflIdpDb2TlXshWgR1F9TeCkvqDx77Vpr4Z/Q=
 github.com/aws/smithy-go v1.27.5 h1:d1ro7KpYOYwP6m73YFa+Kc/A130VsAdX68SpsJwARMM=
 github.com/aws/smithy-go v1.27.5/go.mod h1:YE2RhdIuDbA5E5bTdciG9KrW3+TiEONeUWCqxX9i1Fc=
-github.com/larksuite/cli v1.0.72 h1:fSy1zDhNhSEqeFeH0NRsumdjFBL41wEtp9vWDRzM76I=
-github.com/larksuite/cli v1.0.72/go.mod h1:lM51MfLwn/yNKs4ULqE8iMn92ewhglxZJzwGYnKaf+8=
+github.com/larksuite/cli v1.0.98 h1:QzMr7A4ViqUNo5zrHxxGYjfLlCq1zyXcbBP/Cad0xEU=
+github.com/larksuite/cli v1.0.98/go.mod h1:jnFsLZV5iZUoxpugJo4UFo4VOvQAQkeXFmBBVx6e69Q=

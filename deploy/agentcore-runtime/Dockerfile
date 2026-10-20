@@ -24,7 +24,7 @@
 
 FROM public.ecr.aws/docker/library/golang:1.26-bookworm AS build
 
-ARG LARK_CLI_VERSION=v1.0.72
+ARG LARK_CLI_VERSION=v1.0.98
 
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
