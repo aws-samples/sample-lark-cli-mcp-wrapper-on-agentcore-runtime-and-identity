@@ -293,6 +293,29 @@ func TestDownloadHandler_ReturnsChunkAsEmbeddedBlob(t *testing.T) {
 	}
 }
 
+// Claude Code turns an image/* blob into a re-encoded JPEG preview instead of
+// saving the original bytes, so image blobs are labelled as opaque binary and
+// the real type travels only in the metadata.
+func TestDownloadHandler_ImageBlobIsSentAsOpaqueBinary(t *testing.T) {
+	fakeDownloader(t, "\x89PNG\r\n\x1a\nrest-of-png")
+	handler := newLarkDownloadHandler(newDownloader())
+
+	res, meta, err := handler(context.Background(), &mcp.CallToolRequest{}, larkDownloadArgs{
+		MessageID: "om_1", FileKey: "img_v3_1", Type: "image", FileName: "shot.png",
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("unexpected failure: err=%v content=%+v", err, res.Content)
+	}
+	for _, c := range res.Content {
+		if e, ok := c.(*mcp.EmbeddedResource); ok && e.Resource.MIMEType != "application/octet-stream" {
+			t.Errorf("image blob mime = %q, want application/octet-stream", e.Resource.MIMEType)
+		}
+	}
+	if meta.MIMEType != "image/png" {
+		t.Errorf("metadata mime = %q, want image/png", meta.MIMEType)
+	}
+}
+
 func TestDownloadHandler_FailureIsAToolErrorNotAProtocolError(t *testing.T) {
 	bin := writeFakeBinary(t, `echo "boom" >&2; exit 2`)
 	t.Setenv("LARK_CLI_BIN_PATH", bin)

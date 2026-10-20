@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -278,12 +279,19 @@ func newLarkDownloadHandler(d *downloader) func(context.Context, *mcp.CallToolRe
 		if err != nil {
 			return nil, downloadChunk{}, err
 		}
+		// Claude Code renders an image/* blob as a re-encoded JPEG preview
+		// rather than saving the original bytes, so images go out as opaque
+		// binary; the real type is in the metadata above.
+		blobMIME := chunk.MIMEType
+		if strings.HasPrefix(blobMIME, "image/") {
+			blobMIME = "application/octet-stream"
+		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
 				&mcp.TextContent{Text: string(meta)},
 				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
 					URI:      fmt.Sprintf("lark-file://%s/%s/%d/%s", args.MessageID, args.FileKey, chunk.Chunk, chunk.FileName),
-					MIMEType: chunk.MIMEType,
+					MIMEType: blobMIME,
 					Blob:     chunk.Data,
 				}},
 			},
