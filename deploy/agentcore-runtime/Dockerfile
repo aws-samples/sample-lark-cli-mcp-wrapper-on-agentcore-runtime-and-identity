@@ -17,8 +17,12 @@
 #
 # Build from the repo root:
 #   docker buildx build --platform linux/arm64 -f deploy/agentcore-runtime/Dockerfile -t <tag> .
+#
+# Base images come from the Amazon ECR Public mirror of the Docker official
+# images (public.ecr.aws/docker/library), not Docker Hub: CodeBuild pulls
+# anonymously and Docker Hub rate-limits anonymous pulls (429).
 
-FROM golang:1.26-bookworm AS build
+FROM public.ecr.aws/docker/library/golang:1.26-bookworm AS build
 
 ARG LARK_CLI_VERSION=v1.0.72
 
@@ -52,7 +56,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
     go build -o /out/mcp-wrapper .
 
-FROM debian:bookworm-slim
+FROM public.ecr.aws/docker/library/debian:bookworm-slim
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl \
