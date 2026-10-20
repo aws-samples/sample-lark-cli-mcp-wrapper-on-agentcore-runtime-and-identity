@@ -338,7 +338,7 @@ origin access control 锁到那一个 distribution，直连返回 403。全部�
 
 | 路径 | 内容 |
 |---|---|
-| `mcp-wrapper/` | MCP 协议适配层（独立 Go module）。暴露 `lark_exec`、`lark_list_skills`、`lark_get_skill`、`lark_auth_start`、`lark_auth_complete` |
+| `mcp-wrapper/` | MCP 协议适配层（独立 Go module）。暴露 `lark_exec`、`lark_download`（把消息里的图片或附件按原样分块返回为二进制资源，单文件上限 100 MB）、`lark_list_skills`、`lark_get_skill`、`lark_auth_start`、`lark_auth_complete` |
 | `sidecar/` | 认证 sidecar。从 Token Vault 解析真实飞书 token；唯一持有 token 的进程 |
 | `internal/larkendpoints/` | 从 lark-cli 复制的静态飞书/Lark 域名表，以及一个漂移检查脚本 |
 | `deploy/agentcore-runtime/` | `linux/arm64` runtime 镜像的 Dockerfile、entrypoint 和 CodeBuild buildspec |
@@ -730,7 +730,7 @@ clearing both reverts to the manual flow.
 
 | Path | What it is |
 |---|---|
-| `mcp-wrapper/` | MCP protocol adapter (independent Go module). Exposes `lark_exec`, `lark_list_skills`, `lark_get_skill`, `lark_auth_start`, `lark_auth_complete` |
+| `mcp-wrapper/` | MCP protocol adapter (independent Go module). Exposes `lark_exec`, `lark_download` (returns a message image or attachment as-is, in chunks, as binary resources; 100 MB per file), `lark_list_skills`, `lark_get_skill`, `lark_auth_start`, `lark_auth_complete` |
 | `sidecar/` | Auth sidecar. Resolves real Feishu tokens from the Token Vault; the only process that ever holds one |
 | `internal/larkendpoints/` | Static Feishu/Lark domain table copied from lark-cli, plus a drift check |
 | `deploy/agentcore-runtime/` | Dockerfile, entrypoint, and CodeBuild buildspec for the `linux/arm64` runtime image |

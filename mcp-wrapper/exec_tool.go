@@ -148,13 +148,21 @@ func runLarkExec(ctx context.Context, argsLine string) (execResult, error) {
 	if len(args) == 0 {
 		return execResult{}, fmt.Errorf("empty command")
 	}
+	// The wrapper's own working directory is "/" on AgentCore Runtime, which
+	// the container user cannot write; lark-cli resolves --output relative to
+	// its working directory, so give it one it can write.
+	return runLarkCLI(ctx, os.TempDir(), 30*time.Second, args)
+}
 
+// runLarkCLI executes lark-cli with args in working directory dir (the
+// wrapper's own when empty), bounded by timeout.
+func runLarkCLI(ctx context.Context, dir string, timeout time.Duration, args []string) (execResult, error) {
 	bin, err := resolveLarkCLIBin()
 	if err != nil {
 		return execResult{}, err
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	// The command path is validated by resolveLarkCLIBin above, and args is
@@ -166,6 +174,7 @@ func runLarkExec(ctx context.Context, argsLine string) (execResult, error) {
 	// nosemgrep: dangerous-exec-command
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Env = os.Environ()
+	cmd.Dir = dir
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

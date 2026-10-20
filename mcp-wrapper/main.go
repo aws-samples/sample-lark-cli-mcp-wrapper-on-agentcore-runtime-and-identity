@@ -96,6 +96,11 @@ func main() {
 	}, larkExecHandler)
 
 	mcp.AddTool(server, &mcp.Tool{
+		Name:        "lark_download",
+		Description: "Download an image or file attached to a Feishu message and return its bytes as an embedded binary resource (MCP clients such as Claude Code save it to a local file). Take message_id and the img_/file_ key from the message content (e.g. im +chat-messages-list), and pass the original file name if known. Large files come back in chunks: if the result reports chunks > 1, call again with chunk=1 .. chunks-1, concatenate the saved chunk files in order, and check the result against sha256 and total_size. Files over 100 MB are refused.",
+	}, newLarkDownloadHandler(newDownloader()))
+
+	mcp.AddTool(server, &mcp.Tool{
 		Name:        "lark_list_skills",
 		Description: "List all available lark-cli Skills (structured multi-step operation guides for common Feishu/Lark tasks like scheduling meetings or searching messages).",
 	}, larkListSkillsHandler)

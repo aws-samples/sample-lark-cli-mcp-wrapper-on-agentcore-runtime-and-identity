@@ -54,6 +54,29 @@ func TestRunLarkExec_CapturesNonZeroExit(t *testing.T) {
 	}
 }
 
+// On AgentCore Runtime the wrapper's own working directory is "/", which the
+// non-root container user cannot write, so any lark-cli command that saves a
+// file (--output is relative) failed with "permission denied". lark_exec
+// therefore runs lark-cli in the temp directory.
+func TestRunLarkExec_RunsInTheTempDirectory(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	bin := writeFakeBinary(t, `pwd -P`)
+	t.Setenv("LARK_CLI_BIN_PATH", bin)
+
+	result, err := runLarkExec(context.Background(), "anything")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(tmp)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	if got := strings.TrimSpace(result.Stdout); got != want {
+		t.Errorf("lark-cli working directory = %q, want %q", got, want)
+	}
+}
+
 func TestRunLarkExec_RejectsEmptyCommand(t *testing.T) {
 	_, err := runLarkExec(context.Background(), "")
 	if err == nil {
