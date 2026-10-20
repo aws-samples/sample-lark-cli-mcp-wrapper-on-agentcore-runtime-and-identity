@@ -93,6 +93,30 @@ func TestDownload_PassesResourceFlagsToLarkCLI(t *testing.T) {
 	}
 }
 
+// lark-cli appends an extension inferred from the response to --output and,
+// in newer releases, may report saved_path relative to its working directory.
+// The file must still be found.
+func TestDownload_FindsFileSavedUnderRelativePathWithAddedExtension(t *testing.T) {
+	bin := writeFakeBinary(t, `
+for a in "$@"; do
+  if [ "$prev" = "--output" ]; then out="$a"; fi
+  prev="$a"
+done
+printf 'png-bytes' > "$out.png"
+printf '{"ok":true,"data":{"saved_path":"%s.png"}}' "$out"
+`)
+	t.Setenv("LARK_CLI_BIN_PATH", bin)
+	t.Setenv("TMPDIR", t.TempDir())
+
+	got, err := newDownloader().fetch(context.Background(), downloadRequest{MessageID: "om_1", FileKey: "img_v3_1", Type: "image"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(got.Data) != "png-bytes" {
+		t.Errorf("data = %q, want %q", got.Data, "png-bytes")
+	}
+}
+
 func TestDownload_LargeFileIsSplitIntoChunks(t *testing.T) {
 	fakeDownloader(t, "abcdefghij")
 	t.Setenv("LARK_DOWNLOAD_CHUNK_BYTES", "4")

@@ -193,8 +193,14 @@ func (d *downloader) download(ctx context.Context, req downloadRequest) (*cached
 		} `json:"data"`
 	}
 	if json.Unmarshal([]byte(res.Stdout), &envelope) == nil && envelope.Data.SavedPath != "" {
-		// Trust the reported path only if it stays inside our directory.
-		if p, err := filepath.EvalSymlinks(envelope.Data.SavedPath); err == nil {
+		// lark-cli adds an inferred extension to --output and may report the
+		// path relative to its own working directory, which is dir. Trust the
+		// reported path only if it stays inside dir.
+		saved := envelope.Data.SavedPath
+		if !filepath.IsAbs(saved) {
+			saved = filepath.Join(dir, saved)
+		}
+		if p, err := filepath.EvalSymlinks(saved); err == nil {
 			if realDir, err := filepath.EvalSymlinks(dir); err == nil && filepath.Dir(p) == realDir {
 				path = p
 			}
