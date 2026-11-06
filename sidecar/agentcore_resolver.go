@@ -148,18 +148,36 @@ func baseScopes() []string {
 	}
 }
 
-// botScopes returns the scopes requested for the app-only token. Defaults to
-// baseScopes without AGENTCORE_EXTRA_SCOPES applied: offline_access, the scope
-// that env var exists for, only affects the 3LO refresh path and is rejected
-// as unknown authority for a client-credentials grant. Override the whole list
-// with AGENTCORE_BOT_SCOPES (comma or space separated) when the app's
-// app-identity permissions differ from its user-identity ones — which is the
-// common case, since the developer console grants the two independently.
+// botScopes returns the scopes requested for the app-only token.
+//
+// Unset means an empty list. Feishu's client-credentials grant then issues a
+// token carrying every permission the app holds under app identity, so the
+// default cannot fail on a scope the developer console never granted (the
+// console grants app-identity and user-identity permissions independently, so
+// reusing the user-identity defaults here broke apps that only enabled a few
+// app-identity scopes). AGENTCORE_EXTRA_SCOPES is never applied: offline_access,
+// the scope that env var exists for, only affects the 3LO refresh path.
+//
+// AGENTCORE_BOT_SCOPES (comma or space separated) narrows the token. Every scope
+// listed must be granted under app identity, or Feishu rejects the whole grant
+// with invalid_scope, which AgentCore reports as "Error parsing
+// ClientCredentials response".
+//
+// The result is never nil: the SDK rejects a GetResourceOauth2Token call whose
+// Scopes member is nil, while an empty list is accepted.
 func botScopes() []string {
-	if raw := os.Getenv("AGENTCORE_BOT_SCOPES"); raw != "" {
-		return splitScopes(raw)
+	if s := splitScopes(os.Getenv("AGENTCORE_BOT_SCOPES")); s != nil {
+		return s
 	}
-	return baseScopes()
+	return []string{}
+}
+
+// botScopeHint describes what the M2M call asked for, for error messages.
+func botScopeHint(scopes []string) string {
+	if len(scopes) == 0 {
+		return "no explicit scopes (AGENTCORE_BOT_SCOPES unset, so Feishu grants whatever the app holds under app identity)"
+	}
+	return fmt.Sprintf("scopes %v (from AGENTCORE_BOT_SCOPES; each must be granted under app identity)", scopes)
 }
 
 // extraScopes returns the scopes named in AGENTCORE_EXTRA_SCOPES (comma or
@@ -302,13 +320,18 @@ func (r *agentcoreTokenResolver) resolveBotToken(ctx context.Context) (string, e
 		Oauth2Flow:                     types.Oauth2FlowTypeM2m,
 	})
 	if err != nil {
-		return "", fmt.Errorf("GetResourceOauth2Token (M2M) failed: %w", err)
+		// AgentCore reports any non-token reply from Feishu's token endpoint as
+		// "Error parsing ClientCredentials response", which hides Feishu's own
+		// error. The usual causes are a requested scope the app has not granted
+		// under app identity (invalid_scope) or a stale client secret in the
+		// credential provider (invalid_client), so name both in the error.
+		return "", fmt.Errorf("GetResourceOauth2Token (M2M) failed: %w; requested %s. If Feishu rejected the grant, check that every requested scope is granted under app identity and published (invalid_scope), and that the credential provider's client secret is current (invalid_client)", err, botScopeHint(r.cfg.BotScopes))
 	}
 	if out.AccessToken == nil || *out.AccessToken == "" {
 		// There is no authorization-URL fallback for M2M: a failure here means
 		// the app lacks the requested app-identity permissions, or the
 		// permission change was never published to a new app version.
-		return "", fmt.Errorf("GetResourceOauth2Token (M2M) returned no AccessToken; check that the app grants %v under app identity and that a version was published", r.cfg.BotScopes)
+		return "", fmt.Errorf("GetResourceOauth2Token (M2M) returned no AccessToken; requested %s. Check the app's app-identity permissions and that a version was published", botScopeHint(r.cfg.BotScopes))
 	}
 
 	// Feishu app-only tokens live 2 hours, same as user tokens.

@@ -96,11 +96,36 @@ https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/<uu
 身份栏只让 `--as user` 能用；`--as bot` 走的是 M2M（client credentials）flow，读的是**应用
 身份**栏。
 
-默认 bot 请求的 scope 和用户身份那套一样（但不含 `AGENTCORE_EXTRA_SCOPES`，`offline_access`
-对应用身份没有意义）。两边不一致时用 `AGENTCORE_BOT_SCOPES` 单独指定 bot 要哪些。
+默认（不设 `AGENTCORE_BOT_SCOPES`）bot **不指定 scope**：飞书的 client credentials 换 token
+时不带 scope，就按应用身份栏已开通的权限全部签发。所以应用身份栏开什么，bot 就能用什么，不会因为
+少开了某一个而整个换不到 token。`AGENTCORE_EXTRA_SCOPES` 永远不作用于 bot（`offline_access`
+对应用身份没有意义）。
 
-只勾了用户身份栏就调 `--as bot`，症状是 `GetResourceOauth2Token (M2M) returned no
+想让 bot 的 token 只带一部分权限，设 `AGENTCORE_BOT_SCOPES`（逗号或空格分隔），比如只发消息的
+bot 设 `im:message`。**列出来的每一个都必须在应用身份栏开通并发版**，只要有一个没开，飞书就拒掉
+整个请求（`invalid_scope`），AgentCore 报的是 `ValidationException: Error parsing
+ClientCredentials response`，看不出是 scope 的问题。
+
+应用身份栏一个都没开就调 `--as bot`，症状是 `GetResourceOauth2Token (M2M) returned no
 AccessToken`。同样**改完要发版**。
+
+### 收信人的 open_id 是按应用区分的
+
+同一个人在每个飞书应用下的 `open_id` 都不一样。从别的应用（包括别的 bot）抄来的 `ou_xxx`
+发不出去，报 `99992361 open_id cross app`。在本应用下拿 open_id 的办法（都能用 `--as bot`）：
+
+- 收信人是这个应用的 owner：`api GET /open-apis/application/v6/applications/<app_id> --as bot
+  --params '{"lang":"zh_cn","user_id_type":"open_id"}' --jq '.data.app.owner.owner_id'`。
+  `app_id` 用 `whoami --as bot` 查；`lang` 必填，缺了报 `99992402`。需要应用身份的
+  `application:application:self_manage` 权限。
+- 收信人给 bot 发过私聊：`api GET /open-apis/im/v1/messages --as bot --params
+  '{"container_id_type":"chat","container_id":"<chat_id>","page_size":20}'`，用户消息的
+  `sender.id` 就是。
+- 知道对方的 `union_id`（同一开发者主体下跨应用不变）：`api POST /open-apis/im/v1/messages
+  --as bot --params '{"receive_id_type":"union_id"}' --data '...'`。
+  `im +messages-send --user-id` 只收 `ou_` 开头的 open_id。
+
+注意 `lark-cli api` 默认是用户身份，不加 `--as bot` 会要求浏览器授权。
 
 ### 要发外部（跨租户）群：额外开 External sharing
 
@@ -152,6 +177,8 @@ operate forbid`。要跨租户发消息只能走外部群。
 |---|---|
 | `missing_scope` | 权限没勾，或勾了但没发版（见第 4 步）；也可能勾在了"应用身份"栏而不是"用户身份"栏 |
 | `GetResourceOauth2Token (M2M) returned no AccessToken` | `--as bot` 要的权限没在"应用身份"栏勾，或勾了没发版 |
+| `GetResourceOauth2Token (M2M) failed ... Error parsing ClientCredentials response` | 飞书拒了 client credentials 请求，AgentCore 看不懂飞书的错误体。多半是 `AGENTCORE_BOT_SCOPES` 里有应用身份栏没开的 scope（`invalid_scope` 20068），或者 credential provider 里的 client secret 不是当前的（`invalid_client` 20002）。复现：`curl -X POST https://open.feishu.cn/open-apis/authen/v2/oauth/token -H 'Content-Type: application/json' -d '{"grant_type":"client_credentials","client_id":"cli_xxx","client_secret":"...","scope":"<同样的 scope>"}'` 看飞书原话 |
+| `99992361 open_id cross app` | 收信人的 open_id 是从别的应用抄来的。open_id 按应用区分，见上文「收信人的 open_id 是按应用区分的」 |
 | 发外部群报 `230027` | 用了 `--as user`。外部群只认应用身份，换 `--as bot`；另需开 External sharing 并发版 |
 | 跨租户单聊报 `230038` | 平台限制，任何身份都不行。改走外部群 |
 | 授权页报 redirect URL 不匹配 | 第 2 步的 URL 没填、填错，或 provider 重建过导致 UUID 变了 |
@@ -196,10 +223,29 @@ before deploying. All console-only — no API automates them.
 Adding or removing scopes re-keys the Token Vault slot, so it invalidates the
 existing authorization and needs one more browser login.
 
-**For `--as bot`**, enable the same permissions under the *app identity* column
-too — the console grants the two columns independently, and the M2M flow reads
-the app one. Use `AGENTCORE_BOT_SCOPES` when the two sets differ. Missing app
-permissions surface as `GetResourceOauth2Token (M2M) returned no AccessToken`.
+**For `--as bot`**, enable the permissions the bot needs under the *app identity*
+column — the console grants the two columns independently, and the M2M flow
+reads the app one. By default (`AGENTCORE_BOT_SCOPES` unset) the bot requests no
+explicit scope, and Feishu issues a token carrying everything the app holds under
+app identity, so the default cannot fail on a scope you never enabled.
+`AGENTCORE_EXTRA_SCOPES` never applies to the bot. Set `AGENTCORE_BOT_SCOPES`
+(e.g. `im:message` for a notify-only bot) to narrow the token; every scope listed
+must be granted under app identity, or Feishu rejects the whole grant with
+`invalid_scope`, which AgentCore reports only as `ValidationException: Error
+parsing ClientCredentials response`. No app permission at all surfaces as
+`GetResourceOauth2Token (M2M) returned no AccessToken`.
+
+**open_id is per app.** The same person has a different `open_id` in every Feishu
+app; an `ou_xxx` copied from another app (or another bot) fails with `99992361
+open_id cross app`. Ways to get it within this app, all with `--as bot`: the app
+owner via `api GET /open-apis/application/v6/applications/<app_id> --as bot
+--params '{"lang":"zh_cn","user_id_type":"open_id"}' --jq
+'.data.app.owner.owner_id'` (`app_id` from `whoami --as bot`; `lang` is required;
+needs app-identity `application:application:self_manage`); the `sender.id` of
+the user's messages in their DM with the bot; or send by `union_id`, which is
+stable across one developer's apps, through `api POST /open-apis/im/v1/messages`
+with `receive_id_type=union_id` (`im +messages-send --user-id` takes only
+`ou_` ids). `lark-cli api` defaults to user identity; add `--as bot`.
 
 **To post into external (cross-tenant) groups**, bot identity is mandatory: a
 user-identity send is refused with `230027`. Also turn on **External sharing →
