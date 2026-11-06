@@ -92,7 +92,7 @@ func main() {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "lark_exec",
-		Description: "Execute a lark-cli command and return its stdout/stderr/exit code. Pass the full command line as it would appear after 'lark-cli '. Wrap any argument containing spaces in double or single quotes, e.g. 'im +messages-send --as user --receive-id ou_xxx --receive-id-type open_id --text \"hello world\"'.",
+		Description: "Execute a lark-cli command and return its stdout/stderr/exit code. Pass the full command line as it would appear after 'lark-cli '. Wrap any argument containing spaces in double or single quotes, e.g. 'im +messages-send --as user --user-id ou_xxx --text \"hello world\"' (--user-id takes an open_id, which is scoped per app; use --chat-id oc_xxx for a chat).",
 	}, larkExecHandler)
 
 	mcp.AddTool(server, &mcp.Tool{
