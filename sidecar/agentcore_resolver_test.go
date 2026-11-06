@@ -7,7 +7,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +23,8 @@ import (
 // reaching AWS.
 type fakeIdentityAPI struct {
 	accessToken string
+	// tokenErr, when set, is returned by GetResourceOauth2Token instead of a token.
+	tokenErr error
 
 	tokenCalls []*bedrockagentcore.GetResourceOauth2TokenInput
 }
@@ -33,6 +37,9 @@ func (f *fakeIdentityAPI) GetWorkloadAccessTokenForUserId(context.Context, *bedr
 
 func (f *fakeIdentityAPI) GetResourceOauth2Token(_ context.Context, in *bedrockagentcore.GetResourceOauth2TokenInput, _ ...func(*bedrockagentcore.Options)) (*bedrockagentcore.GetResourceOauth2TokenOutput, error) {
 	f.tokenCalls = append(f.tokenCalls, in)
+	if f.tokenErr != nil {
+		return nil, f.tokenErr
+	}
 	return &bedrockagentcore.GetResourceOauth2TokenOutput{
 		AccessToken: aws.String(f.accessToken),
 	}, nil
@@ -143,6 +150,32 @@ func TestAgentcoreTokenResolver_BotUsesM2MFlowAndBotScopes(t *testing.T) {
 	}
 }
 
+// When AgentCore rejects the M2M call, the error must keep the original cause
+// and point at the two usual culprits: a bot scope the app has not granted under
+// app identity, and a stale client secret. AgentCore's own message ("Error
+// parsing ClientCredentials response") names neither.
+func TestAgentcoreTokenResolver_BotM2MFailureNamesScopesAndSecret(t *testing.T) {
+	t.Setenv("AGENTCORE_BOT_SCOPES", "im:message,calendar:calendar")
+	cause := errors.New("ValidationException: Error parsing ClientCredentials response")
+	r := newTestResolver(&fakeIdentityAPI{tokenErr: cause})
+
+	_, err := r.ResolveToken(t.Context(), "bot")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, cause) {
+		t.Errorf("error %q does not wrap the AgentCore cause", err)
+	}
+	for _, want := range []string{"[im:message calendar:calendar]", "app identity", "AGENTCORE_BOT_SCOPES", "client secret"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing %q", err, want)
+		}
+	}
+	if _, ok := r.cachedToken("bot"); ok {
+		t.Error("a failed M2M call must not leave a cached bot token")
+	}
+}
+
 // A cached user token must never satisfy a bot request: the two identities
 // carry different authority and are keyed separately in the vault.
 func TestAgentcoreTokenResolver_BotCacheSeparateFromUser(t *testing.T) {
@@ -211,8 +244,35 @@ func TestBotScopesExcludeExtraUserScopes(t *testing.T) {
 	if slices.Contains(cfg.BotScopes, "offline_access") {
 		t.Errorf("BotScopes = %v, must not contain offline_access", cfg.BotScopes)
 	}
-	if len(cfg.BotScopes) == 0 {
-		t.Error("BotScopes is empty; the M2M flow requires at least one scope")
+}
+
+// Unset AGENTCORE_BOT_SCOPES requests no explicit scope, so Feishu issues a token
+// with whatever the app holds under app identity instead of failing on a
+// user-identity default the console never granted. The list must still be
+// non-nil: the SDK rejects a GetResourceOauth2Token call with nil Scopes.
+func TestBotScopesDefaultEmptyNonNil(t *testing.T) {
+	for _, raw := range []string{"", " , "} {
+		t.Setenv("AGENTCORE_BOT_SCOPES", raw)
+		got := defaultAgentcoreConfig().BotScopes
+		if got == nil || len(got) != 0 {
+			t.Errorf("AGENTCORE_BOT_SCOPES=%q: BotScopes = %#v, want non-nil empty", raw, got)
+		}
+	}
+}
+
+func TestAgentcoreTokenResolver_BotDefaultSendsEmptyScopes(t *testing.T) {
+	t.Setenv("AGENTCORE_BOT_SCOPES", "")
+	fake := &fakeIdentityAPI{accessToken: "bot-token"}
+	r := newTestResolver(fake)
+
+	if _, err := r.ResolveToken(t.Context(), "bot"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fake.tokenCalls) != 1 {
+		t.Fatalf("GetResourceOauth2Token called %d times, want 1", len(fake.tokenCalls))
+	}
+	if s := fake.tokenCalls[0].Scopes; s == nil || len(s) != 0 {
+		t.Errorf("scopes = %#v, want non-nil empty", s)
 	}
 }
 

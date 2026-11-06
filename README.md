@@ -130,7 +130,7 @@ MCP server 用的是不带任何终端用户 claim 的服务级 SigV4 身份。�
 | `AGENTCORE_RETURN_URL` | `http://localhost:3000/callback` | OAuth2 session binding URL —— 即上面的第二跳。必须在 workload identity 的 `allowedResourceOauth2ReturnUrls` 里。指向一个 [session-binding endpoint](deploy/session-binding/README.md) 可让授权全自动 |
 | `AGENTCORE_STATE_SECRET` | *（未设置）* | `customState` CSRF token 的 HMAC 密钥。配 `AGENTCORE_RETURN_URL` 时必需；不设置就不发 state，loopback 监听器不需要它 |
 | `AGENTCORE_EXTRA_SCOPES` | *（未设置）* | 额外的飞书 scope，逗号或空格分隔。设成 `offline_access` 可申请 refresh token —— 见下文。只影响用户身份 |
-| `AGENTCORE_BOT_SCOPES` | *（同用户身份的默认 scope 集）* | `--as bot` 请求的 scope，逗号或空格分隔。开放平台里应用身份和用户身份的权限是**分别**开通的，两边不一致时用这个覆盖 |
+| `AGENTCORE_BOT_SCOPES` | *（未设置：不指定 scope）* | `--as bot` 请求的 scope，逗号或空格分隔。不设时不带 scope，飞书按开放平台「应用身份」栏已开通的权限全部签发。设了就只要这些，而且**每一个都必须在应用身份栏开通**，否则整个请求被拒，AgentCore 只报 `Error parsing ClientCredentials response`。应用身份和用户身份的权限是**分别**开通的 |
 | `LARKSUITE_CLI_APP_ID` | *（必填）* | 飞书应用 ID（`cli_…`）。必须是给 AgentCore Identity credential provider 提供 client 凭证的那个应用，否则 lark-cli 签名用的应用和 vault 里 token 所属的应用不一致 |
 | `LARK_CLI_BIN_PATH` | `/usr/local/bin/lark-cli` | wrapper shell 出的 lark-cli 二进制路径 |
 
@@ -159,12 +159,13 @@ Token Vault 的槽位是由 workload 名字、`userId` 和**完整 scope 列表*
 |---|---|---|
 | OAuth2 flow | `USER_FEDERATION`（3LO） | `M2M`（client credentials） |
 | 权限来自 | 某个具体人在浏览器里的授权 | 应用自己的 client_id / client_secret |
-| scope 来自 | 开放平台「用户身份」栏 + `AGENTCORE_EXTRA_SCOPES` | 开放平台「应用身份」栏 + `AGENTCORE_BOT_SCOPES` |
+| scope 来自 | 开放平台「用户身份」栏 + `AGENTCORE_EXTRA_SCOPES` | 开放平台「应用身份」栏已开通的全部权限；设了 `AGENTCORE_BOT_SCOPES` 就只要其中这几个 |
 | 过期后 | 没有 `offline_access` 就要人重新点浏览器 | 无人值守自动续 |
 
 **两者不可互换，而且 bot 身份的权限边界明显更宽。** user token 的权限属于某个人；bot token
 是**租户级的应用权限**，意味着任何能连到这个 sidecar 的调用方都以应用身份行事，不再挂在具体
-人头上。部署前先想清楚谁能调到它。
+人头上。默认不指定 scope 时，bot token 带的是应用身份栏开通的**全部**权限；只需要一部分时用
+`AGENTCORE_BOT_SCOPES` 收窄。部署前先想清楚谁能调到它。
 
 之所以要接 bot 身份：飞书有些接口按身份卡权限。最典型的是**外部（跨租户）群** —— 用户身份发
 消息会被拒（错误 `230027`），同一个动作换成应用身份就通。
@@ -488,7 +489,7 @@ for what a multi-tenant `actor_id`-keyed version would need).
 | `AGENTCORE_RETURN_URL` | `http://localhost:3000/callback` | OAuth2 session binding URL — hop 2 above. Must be in the workload identity's `allowedResourceOauth2ReturnUrls`. Set to a [session-binding endpoint](deploy/session-binding/README.md) to make authorization fully automatic |
 | `AGENTCORE_STATE_SECRET` | *(unset)* | HMAC key for the `customState` CSRF token. Required with `AGENTCORE_RETURN_URL`; unset means no state is sent, which the loopback listener does not need |
 | `AGENTCORE_EXTRA_SCOPES` | *(unset)* | Extra Feishu scopes, comma or space separated. Set to `offline_access` to request a refresh token — see below. User identity only |
-| `AGENTCORE_BOT_SCOPES` | *(same defaults as user identity)* | Scopes requested for `--as bot`, comma or space separated. The developer console grants app-identity and user-identity permissions **independently**; override here when the two differ |
+| `AGENTCORE_BOT_SCOPES` | *(unset: no explicit scope)* | Scopes requested for `--as bot`, comma or space separated. Unset sends no scope, and Feishu issues a token with everything the app holds under the console "app identity" column. When set, the token carries only these, and **every one must be granted under app identity** or Feishu rejects the whole grant, which AgentCore reports only as `Error parsing ClientCredentials response`. The console grants app-identity and user-identity permissions **independently** |
 | `LARKSUITE_CLI_APP_ID` | *(required)* | Feishu app ID (`cli_…`). Must be the app whose client credentials back the AgentCore Identity credential provider, or lark-cli signs as a different app than the vaulted token was issued for |
 | `LARK_CLI_BIN_PATH` | `/usr/local/bin/lark-cli` | lark-cli binary the wrapper shells out to |
 
@@ -526,13 +527,16 @@ flow:
 |---|---|---|
 | OAuth2 flow | `USER_FEDERATION` (3LO) | `M2M` (client credentials) |
 | Authority from | one person's browser consent | the app's own client_id / client_secret |
-| Scopes from | console "user identity" column + `AGENTCORE_EXTRA_SCOPES` | console "app identity" column + `AGENTCORE_BOT_SCOPES` |
+| Scopes from | console "user identity" column + `AGENTCORE_EXTRA_SCOPES` | everything granted in the console "app identity" column, narrowed to `AGENTCORE_BOT_SCOPES` when set |
 | On expiry | back to the browser unless `offline_access` is in scope | renews unattended |
 
 **They are not interchangeable, and the bot identity is markedly broader.** A
 user token carries one person's authority; a bot token carries **tenant-wide app
 authority**, so any caller able to reach this sidecar acts as the app rather than
-as a named person. Decide who can reach it before deploying.
+as a named person. With no explicit scope (the default) a bot token carries
+**every** permission granted under app identity; narrow it with
+`AGENTCORE_BOT_SCOPES` when the bot needs only a few. Decide who can reach it
+before deploying.
 
 The reason bot identity is wired at all: Feishu gates some surfaces on identity.
 The clearest case is **external (cross-tenant) chats** — a user-identity send is
